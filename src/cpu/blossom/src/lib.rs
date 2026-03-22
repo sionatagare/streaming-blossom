@@ -26,3 +26,10 @@ lazy_static! {
     /// see dual_module_comb.test for example
     static ref ENV_PARAMETER_LOCK: Mutex<()> = Mutex::new(());
 }
+
+// Provide print_char for native targets (satisfies micro_blossom_nostd's c_printer)
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn print_char(c: u8) {
+    print!("{}", c as char);
+}

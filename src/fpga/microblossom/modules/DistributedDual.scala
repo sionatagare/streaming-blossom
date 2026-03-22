@@ -41,9 +41,13 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
   broadcastRegInserted.addAttribute("clock_buffer_type = \"BUFG\"")
 
   // instantiate vertices, edges and offloaders
+  // first layer (t=0) vertices are elastic; the rest are not
+  val firstLayerVertexIndices =
+    if (config.numLayers > 0) config.layerFusion.layers(0).map(_.toInt).toSet
+    else Set.empty[Int]
   val vertices = Seq
     .range(0, config.vertexNum)
-    .map(vertexIndex => new Vertex(config, vertexIndex))
+    .map(vertexIndex => new Vertex(config, vertexIndex, elastic = firstLayerVertexIndices(vertexIndex)))
   val edges = Seq
     .range(0, config.edgeNum)
     .map(edgeIndex => new Edge(config, edgeIndex))

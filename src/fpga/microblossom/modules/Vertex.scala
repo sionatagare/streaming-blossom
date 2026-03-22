@@ -40,7 +40,7 @@ object Vertex {
   }
 }
 
-case class Vertex(config: DualConfig, vertexIndex: Int) extends Component {
+case class Vertex(config: DualConfig, vertexIndex: Int, elastic: Boolean = false) extends Component {
   val io = new Bundle {
     val message = in(BroadcastMessage(config))
     // interaction I/O
@@ -72,12 +72,18 @@ case class Vertex(config: DualConfig, vertexIndex: Int) extends Component {
 
   // fetch
   var ram: Mem[VertexState] = null
+  var layers: Mem[VertexState] = null
   var register = Reg(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)))
   register.init(VertexState.resetValue(config, vertexIndex))
   var fetchState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   var message = BroadcastMessage(config)
+
+  val elasticLayersDepth = if (elastic) config.contextDepth * elasticRoundsPerContext else 1
+  val elasticRoundCounterBits = if (elastic) log2Up(elasticRoundsPerContext) else 1
+  var roundCounter: Mem[UInt] = null
+
+  // Fetch: always from ram (context switching) or register (single context). Elastic does not read from layers.
   if (config.contextBits > 0) {
-    // fetch stage, delay the instruction
     ram = Mem(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)), config.contextDepth)
     ram.setTechnology(ramBlock)
     fetchState := ram.readSync(
@@ -88,6 +94,12 @@ case class Vertex(config: DualConfig, vertexIndex: Int) extends Component {
   } else {
     fetchState := register
     message := io.message
+  }
+
+  if (elastic) {
+    layers = Mem(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)), elasticLayersDepth)
+    layers.setTechnology(ramBlock)
+    roundCounter = Mem(UInt(elasticRoundCounterBits bits), config.contextDepth)
   }
 
   stages.offloadSet.message := message
@@ -186,7 +198,7 @@ case class Vertex(config: DualConfig, vertexIndex: Int) extends Component {
   val outDelay = (config.contextDepth != 1).toInt
   io.maxGrowable := Delay(vertexResponse.io.maxGrowable, outDelay)
 
-  // write back
+  // write back: always update ram or register; when elastic, also append state to layers at the end
   val writeState = stages.updateGet3.state
   if (config.contextBits > 0) {
     ram.write(
@@ -197,6 +209,21 @@ case class Vertex(config: DualConfig, vertexIndex: Int) extends Component {
   } else {
     when(stages.updateGet3.compact.valid) {
       register := writeState
+    }
+  }
+  if (elastic) {
+    val writeContextId =
+      if (config.contextBits > 0) stages.updateGet3.compact.contextId
+      else U(0, 1 bits)
+    val writeRoundVal = roundCounter.readAsync(writeContextId)
+    val layersWriteAddr = (writeContextId * U(elasticRoundsPerContext, elasticRoundCounterBits bits).resize(log2Up(elasticLayersDepth))) + writeRoundVal.resize(log2Up(elasticLayersDepth))
+    layers.write(
+      address = layersWriteAddr,
+      data = writeState,
+      enable = stages.updateGet3.compact.valid
+    )
+    when(stages.updateGet3.compact.valid) {
+      roundCounter.write(writeContextId, writeRoundVal + 1)
     }
   }
 
