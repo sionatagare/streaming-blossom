@@ -78,6 +78,7 @@ case class DualConfig(
   /// Per vertex: 0 = `ArchiveElasticSlice` does not update live storage; 1 = copy donor; 2 = load reset.
   private var archiveElasticLayerShiftMode: Array[Int] = Array.empty[Int]
   /// When mode==1, donor vertex index (strictly higher layer).
+  /// look up table for whether to copy from donor, reset, or do nothing (0)
   private var archiveElasticLayerShiftDonor: Array[Int] = Array.empty[Int]
 
   def archiveElasticLayerShiftModeOf(vertexIndex: Int): Int = {
@@ -149,11 +150,13 @@ case class DualConfig(
           below.length == above.length,
           s"layer fusion: layers($L) and layers(${L + 1}) must have equal length for archive+layer-shift"
         )
+        // ensure middle vertices are all enabeled to shift
         for (i <- below.indices) {
           archiveElasticLayerShiftMode(below(i)) = 1
           archiveElasticLayerShiftDonor(below(i)) = above(i)
         }
       }
+      // ensure last layer is set to reset not shift
       for (v <- lf.layers(nl - 1)) {
         archiveElasticLayerShiftMode(v.toInt) = 2
       }

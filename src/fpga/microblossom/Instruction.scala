@@ -40,6 +40,8 @@ case class Instruction(config: DualConfig = DualConfig()) extends Bits {
             hasError := True
           }
         } otherwise {
+          // Clear shared upper field first so every extended encoding fully defines `this` (matches assignFindObstacle / assignArchiveElasticSlice order).
+          payload.clearAll()
           extendedOpCode := source.extendedOpCode
           extensionIndicator := source.extensionIndicator
           when(source.extendedOpCode.asUInt === ExtendedOpCode.Grow) {
