@@ -40,7 +40,13 @@ object Vertex {
   }
 }
 
-case class Vertex(config: DualConfig, vertexIndex: Int, elastic: Boolean = false) extends Component {
+case class Vertex(
+    config: DualConfig,
+    vertexIndex: Int,
+    elastic: Boolean = false,
+    /// When true, `shiftDonorLive` is tied to `shiftSource` (standalone elaboration). `DistributedDual` sets false and wires donors.
+    tieShiftDonorToSelf: Boolean = true
+) extends Component {
   val io = new Bundle {
     val message = in(BroadcastMessage(config))
     // interaction I/O
@@ -63,6 +69,10 @@ case class Vertex(config: DualConfig, vertexIndex: Int, elastic: Boolean = false
           yield Vertex.getStages(config, config.peerVertexOfEdge(edgeIndex, vertexIndex)).executeGet3
       )
     )
+    /// Live vertex state before this cycle's register/RAM update (for `ArchiveElasticSlice` layer shift donors).
+    val shiftSource = out(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)))
+    /// Donor live state, wired in `DistributedDual` when this vertex shifts from a higher layer.
+    val shiftDonorLive = in(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)))
     // final outputs
     val maxGrowable = out(ConvergecastMaxGrowable(config.weightBits))
   }
@@ -78,9 +88,8 @@ case class Vertex(config: DualConfig, vertexIndex: Int, elastic: Boolean = false
   var fetchState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   var message = BroadcastMessage(config)
 
-  val elasticLayersDepth = if (elastic) config.contextDepth * elasticRoundsPerContext else 1
-  val elasticRoundCounterBits = if (elastic) log2Up(elasticRoundsPerContext) else 1
-  var roundCounter: Mem[UInt] = null
+  // One archived snapshot per context (written only on ArchiveElasticSlice).
+  val elasticLayersDepth = if (elastic) config.contextDepth else 1
 
   // Fetch: always from ram (context switching) or register (single context). Elastic does not read from layers.
   if (config.contextBits > 0) {
@@ -99,7 +108,6 @@ case class Vertex(config: DualConfig, vertexIndex: Int, elastic: Boolean = false
   if (elastic) {
     layers = Mem(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)), elasticLayersDepth)
     layers.setTechnology(ramBlock)
-    roundCounter = Mem(UInt(elasticRoundCounterBits bits), config.contextDepth)
   }
 
   stages.offloadSet.message := message
@@ -171,6 +179,8 @@ case class Vertex(config: DualConfig, vertexIndex: Int, elastic: Boolean = false
     )
     vertexPostUpdateState.io.before := stages.updateGet.state
     vertexPostUpdateState.io.propagator := stages.updateGet.propagatingPeer
+    vertexPostUpdateState.io.holdForArchive :=
+      stages.updateGet.compact.valid && stages.updateGet.compact.isArchiveElasticSlice
     stages.updateSet2.state := vertexPostUpdateState.io.after
 
   }
@@ -198,33 +208,90 @@ case class Vertex(config: DualConfig, vertexIndex: Int, elastic: Boolean = false
   val outDelay = (config.contextDepth != 1).toInt
   io.maxGrowable := Delay(vertexResponse.io.maxGrowable, outDelay)
 
-  // write back: always update ram or register; when elastic, also append state to layers at the end
   val writeState = stages.updateGet3.state
+  val compact = stages.updateGet3.compact
+  val commitArchive = compact.valid && compact.isArchiveElasticSlice
+  val memWriteEnable = compact.valid && !compact.isArchiveElasticSlice
+  val archShiftMode = config.archiveElasticLayerShiftModeOf(vertexIndex)
+  val shiftWriteEnable = commitArchive && archShiftMode =/= 0
+  val resetLiveState = VertexState.resetValue(config, vertexIndex)
+
   if (config.contextBits > 0) {
+    val rs = ram.readAsync(compact.contextId)
+    io.shiftSource.speed := rs.speed
+    io.shiftSource.node := rs.node
+    io.shiftSource.root := rs.root
+    io.shiftSource.isVirtual := rs.isVirtual
+    io.shiftSource.isDefect := rs.isDefect
+    io.shiftSource.grown := rs.grown
+
+    val ramWriteData = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+    when(shiftWriteEnable) {
+      if (archShiftMode == 1) {
+        ramWriteData := io.shiftDonorLive
+      } else {
+        ramWriteData.speed := resetLiveState.speed
+        ramWriteData.node := resetLiveState.node
+        ramWriteData.root := resetLiveState.root
+        ramWriteData.isVirtual := resetLiveState.isVirtual
+        ramWriteData.isDefect := resetLiveState.isDefect
+        ramWriteData.grown := resetLiveState.grown
+      }
+    } otherwise {
+      ramWriteData := writeState
+    }
     ram.write(
-      address = stages.updateGet3.compact.contextId,
-      data = writeState,
-      enable = stages.updateGet3.compact.valid
+      address = compact.contextId,
+      data = ramWriteData,
+      enable = memWriteEnable || shiftWriteEnable
     )
+    if (elastic) {
+      layers.write(
+        address = compact.contextId.resize(log2Up(elasticLayersDepth)),
+        data = rs,
+        enable = commitArchive
+      )
+    }
   } else {
-    when(stages.updateGet3.compact.valid) {
-      register := writeState
+    io.shiftSource := register
+    if (archShiftMode == 1) {
+      when(commitArchive) {
+        register := io.shiftDonorLive
+      } elsewhen (memWriteEnable) {
+        register := writeState
+      }
+    } else if (archShiftMode == 2) {
+      when(commitArchive) {
+        register.speed := resetLiveState.speed
+        register.node := resetLiveState.node
+        register.root := resetLiveState.root
+        register.isVirtual := resetLiveState.isVirtual
+        register.isDefect := resetLiveState.isDefect
+        register.grown := resetLiveState.grown
+      } elsewhen (memWriteEnable) {
+        register := writeState
+      }
+    } else {
+      when(memWriteEnable) {
+        register := writeState
+      }
+    }
+    if (elastic) {
+      layers.write(
+        address = U(0, log2Up(elasticLayersDepth) bits),
+        data = register,
+        enable = commitArchive
+      )
     }
   }
-  if (elastic) {
-    val writeContextId =
-      if (config.contextBits > 0) stages.updateGet3.compact.contextId
-      else U(0, 1 bits)
-    val writeRoundVal = roundCounter.readAsync(writeContextId)
-    val layersWriteAddr = (writeContextId * U(elasticRoundsPerContext, elasticRoundCounterBits bits).resize(log2Up(elasticLayersDepth))) + writeRoundVal.resize(log2Up(elasticLayersDepth))
-    layers.write(
-      address = layersWriteAddr,
-      data = writeState,
-      enable = stages.updateGet3.compact.valid
-    )
-    when(stages.updateGet3.compact.valid) {
-      roundCounter.write(writeContextId, writeRoundVal + 1)
-    }
+
+  if (tieShiftDonorToSelf) {
+    io.shiftDonorLive.speed := io.shiftSource.speed
+    io.shiftDonorLive.node := io.shiftSource.node
+    io.shiftDonorLive.root := io.shiftSource.root
+    io.shiftDonorLive.isVirtual := io.shiftSource.isVirtual
+    io.shiftDonorLive.isDefect := io.shiftSource.isDefect
+    io.shiftDonorLive.grown := io.shiftSource.grown
   }
 
   // inject registers
@@ -251,7 +318,7 @@ class VertexTest extends AnyFunSuite {
 // sbt "runMain microblossom.modules.VertexEstimation"
 object VertexEstimation extends App {
   def dualConfig(name: String): DualConfig = {
-    DualConfig(filename = s"./resources/graphs/example_$name.json"),
+    DualConfig(filename = s"./resources/graphs/example_$name.json")
   }
   val configurations = List(
     // 33xLUT6, 21xLUT5, 7xLUT4, 6xLUT3, 7xLUT2 -> 74

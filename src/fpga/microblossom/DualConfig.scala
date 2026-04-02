@@ -75,6 +75,20 @@ case class DualConfig(
   val edgeConditionedVertex = collection.mutable.Map[Int, Int]()
   val vertexLayerId = collection.mutable.Map[Int, Int]()
 
+  /// Per vertex: 0 = `ArchiveElasticSlice` does not update live storage; 1 = copy donor; 2 = load reset.
+  private var archiveElasticLayerShiftMode: Array[Int] = Array.empty[Int]
+  /// When mode==1, donor vertex index (strictly higher layer).
+  private var archiveElasticLayerShiftDonor: Array[Int] = Array.empty[Int]
+
+  def archiveElasticLayerShiftModeOf(vertexIndex: Int): Int = {
+    if (archiveElasticLayerShiftMode.isEmpty) 0
+    else archiveElasticLayerShiftMode(vertexIndex)
+  }
+  def archiveElasticLayerShiftDonorOf(vertexIndex: Int): Int = {
+    if (archiveElasticLayerShiftDonor.isEmpty) 0
+    else archiveElasticLayerShiftDonor(vertexIndex)
+  }
+
   if (filename != null) {
     val source = scala.io.Source.fromFile(filename)
     val json_content =
@@ -118,6 +132,32 @@ case class DualConfig(
     // build vertex to neighbor edge mapping
     updateIncidentEdges()
     updateOffloading()
+    updateArchiveElasticLayerShiftTable()
+  }
+
+  /** Build donor map: each vertex in layer L copies from same index in layer L+1; top layer resets. */
+  def updateArchiveElasticLayerShiftTable(): Unit = {
+    archiveElasticLayerShiftMode = Array.fill(vertexNum)(0)
+    archiveElasticLayerShiftDonor = Array.fill(vertexNum)(0)
+    if (supportLayerFusion && numLayers >= 2) {
+      val lf = layerFusion
+      val nl = numLayers.toInt
+      for (L <- 0 until nl - 1) {
+        val below = lf.layers(L).map(_.toInt)
+        val above = lf.layers(L + 1).map(_.toInt)
+        assert(
+          below.length == above.length,
+          s"layer fusion: layers($L) and layers(${L + 1}) must have equal length for archive+layer-shift"
+        )
+        for (i <- below.indices) {
+          archiveElasticLayerShiftMode(below(i)) = 1
+          archiveElasticLayerShiftDonor(below(i)) = above(i)
+        }
+      }
+      for (v <- lf.layers(nl - 1)) {
+        archiveElasticLayerShiftMode(v.toInt) = 2
+      }
+    }
   }
 
   def updateIncidentEdges() = {

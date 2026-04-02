@@ -47,7 +47,8 @@ case class Instruction(config: DualConfig = DualConfig()) extends Bits {
             when(source.extendedPayload.asUInt > extendedPayload.asUInt.maxValue) {
               hasError := True
             }
-          } otherwise {
+          }.elsewhen(source.extendedOpCode.asUInt === ExtendedOpCode.ArchiveElasticSlice) {
+          }.otherwise {
             field1 := source.field1.resized
             extendedField2 := source.extendedField2.resized
             when(source.field1.asUInt > field1.asUInt.maxValue) {
@@ -91,6 +92,7 @@ case class Instruction(config: DualConfig = DualConfig()) extends Bits {
   def isFindObstacle(): Bool = isExtended && (extendedOpCode === ExtendedOpCode.FindObstacle)
   def isReset(): Bool = isExtended && (extendedOpCode === ExtendedOpCode.Reset)
   def isLoadDefectsExternal(): Bool = isExtended && (extendedOpCode === ExtendedOpCode.LoadDefectsExternal)
+  def isArchiveElasticSlice(): Bool = isExtended && (extendedOpCode === ExtendedOpCode.ArchiveElasticSlice)
 
   def isChangingSyndrome(): Bool = isAddDefect || isReset || isLoadDefectsExternal
 
@@ -108,6 +110,10 @@ case class Instruction(config: DualConfig = DualConfig()) extends Bits {
   def assignFindObstacle() = {
     payload.clearAll()
     assignExtendedOpCode(ExtendedOpCode.FindObstacle)
+  }
+  def assignArchiveElasticSlice() = {
+    payload.clearAll()
+    assignExtendedOpCode(ExtendedOpCode.ArchiveElasticSlice)
   }
 }
 
@@ -177,6 +183,9 @@ case class InstructionSpec(config: DualConfig) {
   def generateLoadDefectsExternal(time: Long): Long = {
     generateExtendedSuffix(ExtendedOpCode.LoadDefectsExternal) | field1Range.masked(time)
   }
+  def generateArchiveElasticSlice(): Long = {
+    generateExtendedSuffix(ExtendedOpCode.ArchiveElasticSlice)
+  }
 
   def sanityCheck() = {
     assert(config.weightBits + 2 <= numBits)
@@ -204,6 +213,8 @@ case class InstructionSpec(config: DualConfig) {
   def isReset(value: Long) = isExtended(value) && (extendedOpCode(value) == ExtendedOpCode.Reset)
   def isLoadDefectsExternal(value: Long) =
     isExtended(value) && (extendedOpCode(value) == ExtendedOpCode.LoadDefectsExternal)
+  def isArchiveElasticSlice(value: Long) =
+    isExtended(value) && (extendedOpCode(value) == ExtendedOpCode.ArchiveElasticSlice)
 
   def isValid(value: Long): Boolean = {
     value < (1L << numBits)
@@ -229,6 +240,8 @@ case class InstructionSpec(config: DualConfig) {
       return s"Reset()"
     } else if (isLoadDefectsExternal(value)) {
       return s"LoadDefectsExternal(time=${field1(value)})"
+    } else if (isArchiveElasticSlice(value)) {
+      return s"ArchiveElasticSlice()"
     } else {
       return s"Unknown(value=${value}=0b${binaryOf(value)})"
     }
@@ -268,6 +281,8 @@ case class InstructionSpec(config: DualConfig) {
       val result = spec.generateLoadDefectsExternal(field1(value))
       assert(spec.field1(result) == field1(value))
       return result
+    } else if (isArchiveElasticSlice(value)) {
+      return spec.generateArchiveElasticSlice()
     } else {
       throw new Exception(s"Unknown(value=${value}=0b${binaryOf(value)})")
     }

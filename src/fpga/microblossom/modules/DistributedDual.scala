@@ -47,7 +47,14 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     else Set.empty[Int]
   val vertices = Seq
     .range(0, config.vertexNum)
-    .map(vertexIndex => new Vertex(config, vertexIndex, elastic = firstLayerVertexIndices(vertexIndex)))
+    .map(vertexIndex =>
+      new Vertex(
+        config,
+        vertexIndex,
+        elastic = firstLayerVertexIndices(vertexIndex),
+        tieShiftDonorToSelf = false
+      )
+    )
   val edges = Seq
     .range(0, config.edgeNum)
     .map(edgeIndex => new Edge(config, edgeIndex))
@@ -68,6 +75,24 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       vertex.io.peerVertexInputsExecute3(localIndex) := vertices(
         config.peerVertexOfEdge(edgeIndex, vertexIndex)
       ).io.stageOutputs.executeGet3
+    }
+    // `ArchiveElasticSlice`: layer shift donors (strictly higher layer → lower); unused vertices tie to self.
+    if (config.archiveElasticLayerShiftModeOf(vertexIndex) == 1) {
+      val donorVi = config.archiveElasticLayerShiftDonorOf(vertexIndex)
+      val dVert = vertices(donorVi)
+      vertex.io.shiftDonorLive.speed := dVert.io.shiftSource.speed
+      vertex.io.shiftDonorLive.node := dVert.io.shiftSource.node
+      vertex.io.shiftDonorLive.root := dVert.io.shiftSource.root
+      vertex.io.shiftDonorLive.isVirtual := dVert.io.shiftSource.isVirtual
+      vertex.io.shiftDonorLive.isDefect := dVert.io.shiftSource.isDefect
+      vertex.io.shiftDonorLive.grown := dVert.io.shiftSource.grown.resize(vertex.io.shiftDonorLive.grown.getWidth bits)
+    } else {
+      vertex.io.shiftDonorLive.speed := vertex.io.shiftSource.speed
+      vertex.io.shiftDonorLive.node := vertex.io.shiftSource.node
+      vertex.io.shiftDonorLive.root := vertex.io.shiftSource.root
+      vertex.io.shiftDonorLive.isVirtual := vertex.io.shiftSource.isVirtual
+      vertex.io.shiftDonorLive.isDefect := vertex.io.shiftSource.isDefect
+      vertex.io.shiftDonorLive.grown := vertex.io.shiftSource.grown
     }
   }
 

@@ -14,20 +14,23 @@ object VertexPostUpdateState {
       after: VertexState, // output
       before: VertexState,
       propagator: VertexPropagatingPeerResult,
-      config: DualConfig
+      config: DualConfig,
+      holdForArchive: Bool
   ) = {
 
     after := before
 
-    when(!before.isDefect && !before.isVirtual && (before.grown === 0)) {
-      when(propagator.valid) {
-        after.node := propagator.node
-        after.root := propagator.root
-        after.speed := Speed.Grow
-      } otherwise {
-        after.node := config.IndexNone
-        after.root := config.IndexNone
-        after.speed := Speed.Stay
+    when(!holdForArchive) {
+      when(!before.isDefect && !before.isVirtual && (before.grown === 0)) {
+        when(propagator.valid) {
+          after.node := propagator.node
+          after.root := propagator.root
+          after.speed := Speed.Grow
+        } otherwise {
+          after.node := config.IndexNone
+          after.root := config.IndexNone
+          after.speed := Speed.Stay
+        }
       }
     }
 
@@ -40,6 +43,7 @@ case class VertexPostUpdateState(config: DualConfig, vertexIndex: Int) extends C
   val io = new Bundle {
     val before = in(VertexState(config.vertexBits, grownBits))
     val propagator = in(VertexPropagatingPeerResult(config.vertexBits))
+    val holdForArchive = in(Bool())
 
     val after = out(VertexState(config.vertexBits, grownBits))
   }
@@ -48,7 +52,8 @@ case class VertexPostUpdateState(config: DualConfig, vertexIndex: Int) extends C
     io.after,
     io.before,
     io.propagator,
-    config
+    config,
+    io.holdForArchive
   )
 }
 
@@ -66,7 +71,7 @@ class VertexPostUpdateStateTest extends AnyFunSuite {
 // sbt 'runMain microblossom.combinatorial.VertexPostUpdateStateEstimation'
 object VertexPostUpdateStateEstimation extends App {
   def dualConfig(name: String): DualConfig = {
-    DualConfig(filename = s"./resources/graphs/example_$name.json"),
+    DualConfig(filename = s"./resources/graphs/example_$name.json")
   }
   val configurations = List(
     // delay: 0.41ns

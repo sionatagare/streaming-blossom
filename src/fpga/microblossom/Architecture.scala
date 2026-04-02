@@ -19,7 +19,7 @@ import spinal.core._
  * |                                         0                                   | 3'b100 | 3'b100 | Reset
  * |                  Time[14:0]                |           Channel[10:0]        | 3'b101 | 3'b100 | LoadDefectsExternal/LayerFusion
  * |                                      Length[25:0]                           | 3'b110 | 3'b100 | Grow
- * |                 Vertex[14:0]               | v|e | t|e |                    | 3'b111 | 3'b100 | SetAttribute(debug)
+ * |                                      (reserved)                             | 3'b111 | 3'b100 | ArchiveElasticSlice (+ layer shift when layer fusion has ≥2 layers)
  * -------------------------------------------------------------------------------------------------
  *
  *
@@ -75,7 +75,8 @@ object ExtendedOpCode {
   def Reset = Integer.parseInt("100", 2)
   def LoadDefectsExternal = Integer.parseInt("101", 2)
   def Grow = Integer.parseInt("110", 2)
-  def Reserved2 = Integer.parseInt("111", 2)
+  /// Snapshot layer-0 (elastic) vertex state into `layers` BRAM; does not commit a normal vertex RAM write.
+  def ArchiveElasticSlice = Integer.parseInt("111", 2)
 }
 
 case class Speed() extends Bits {

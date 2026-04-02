@@ -25,11 +25,13 @@ case class BroadcastMessage(config: DualConfig, explicitReset: Boolean = true) e
 case class BroadcastCompact(config: DualConfig) extends Bundle {
   val valid = Bool
   val isReset = Bool
+  val isArchiveElasticSlice = Bool
   val contextId = (config.contextBits > 0) generate UInt(config.contextBits bits)
 
   def connect(message: BroadcastMessage) = {
     valid := message.valid
     isReset := message.isReset
+    isArchiveElasticSlice := message.valid && message.instruction.isArchiveElasticSlice()
     if (config.contextBits > 0) {
       contextId := message.contextId
     }
