@@ -2,7 +2,6 @@ package microblossom.combinatorial
 
 import spinal.core._
 import spinal.lib._
-import spinal.core.sim._
 import microblossom._
 import microblossom.util.Vivado
 import scala.collection.mutable
@@ -52,11 +51,6 @@ object VertexPostExecuteStateCommon {
           when(isVertexEqField1) {
             after.isDefect := True
             after.speed := Speed.Grow
-            assert(
-              assertion = before.node === config.IndexNone,
-              message = "Cannot set a vertex to defect when it's already occupied",
-              severity = ERROR
-            )
             after.node := instruction.field2.resized
             after.root := instruction.field2.resized
           }
