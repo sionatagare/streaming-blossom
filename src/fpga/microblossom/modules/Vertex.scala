@@ -179,6 +179,7 @@ case class Vertex(
     )
     vertexPostUpdateState.io.before := stages.updateGet.state
     vertexPostUpdateState.io.propagator := stages.updateGet.propagatingPeer
+    // do not update vertex's data while shifting is happening
     vertexPostUpdateState.io.holdForArchive :=
       stages.updateGet.compact.valid && stages.updateGet.compact.isArchiveElasticSlice
     stages.updateSet2.state := vertexPostUpdateState.io.after
@@ -208,12 +209,13 @@ case class Vertex(
   val outDelay = (config.contextDepth != 1).toInt
   io.maxGrowable := Delay(vertexResponse.io.maxGrowable, outDelay)
 
+  // shift logic for both ram & register storage
   val writeState = stages.updateGet3.state
   val compact = stages.updateGet3.compact
   val commitArchive = compact.valid && compact.isArchiveElasticSlice
   val memWriteEnable = compact.valid && !compact.isArchiveElasticSlice
   val archShiftMode = config.archiveElasticLayerShiftModeOf(vertexIndex)
-  val shiftWriteEnable = commitArchive && archShiftMode =/= 0
+  val shiftWriteEnable = if (archShiftMode != 0) commitArchive else False
   val resetLiveState = VertexState.resetValue(config, vertexIndex)
 
   if (config.contextBits > 0) {
@@ -284,7 +286,7 @@ case class Vertex(
       )
     }
   }
-
+  // debugging etc purposes
   if (tieShiftDonorToSelf) {
     io.shiftDonorLive.speed := io.shiftSource.speed
     io.shiftDonorLive.node := io.shiftSource.node
