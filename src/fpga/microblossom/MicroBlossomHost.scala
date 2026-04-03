@@ -48,9 +48,8 @@ object MicroBlossomHost extends SimulationTcpHost("MicroBlossomHost") {
         val component: Component = MicroBlossomBusType.generateByName(busTypeFull, config, emuConfig.clockDivideBy)
         require(component.isInstanceOf[MicroBlossomBus[_, _]])
         val dut = component.asInstanceOf[MicroBlossomBus[IMasterSlave, BusSlaveFactoryDelayed]]
-        if (emuConfig.withWaveform) {
-          dut.simMakePublicSnapshot()
-        }
+        // Snapshot over TCP needs register visibility; do not gate on withWaveform (waveform only adds FST dumping).
+        dut.simMakePublicSnapshot()
         dut.simMakePublicPreMatching()
         dut
       })
