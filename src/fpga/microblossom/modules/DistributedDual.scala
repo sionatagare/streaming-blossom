@@ -437,6 +437,119 @@ class DistributedDualTest extends AnyFunSuite {
       }
   }
 
+  test("chain shift — two consecutive ArchiveElasticSlice on phenomenological d3") {
+    // Uses phenomenological_rotated_d3 with supportLayerFusion to exercise the layer shift chain.
+    // Graph columns (same positional index across layers):
+    //   Layer 0 (elastic): v0,  v3,  v4,  v7   — shift mode 1 (copy from layer 1)
+    //   Layer 1:           v8,  v11, v12, v15   — shift mode 1 (copy from layer 2)
+    //   Layer 2:           v16, v19, v20, v23   — shift mode 1 (copy from layer 3)
+    //   Layer 3 (top):     v24, v27, v28, v31   — shift mode 2 (reset)
+    //
+    // After the first ArchiveElasticSlice, each vertex takes its donor's state:
+    //   v0  ← v8's old state, v8  ← v16's old state, v16 ← v24's old state, v24 ← reset
+    // After the second ArchiveElasticSlice, the chain shifts again:
+    //   v0  ← v8's state (which was v16's old), v8 ← v16's (which was v24's from round 1), etc.
+    //
+    // gtkwave simWorkspace/DistributedDual/testChainShift.fst
+    val config = DualConfig(
+      filename = "./resources/graphs/example_phenomenological_rotated_d3.json",
+      minimizeBits = false
+    )
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq() // remove all offloaders
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 1
+    config.sanityCheck()
+    Config.sim
+      .compile({
+        val dut = DistributedDual(config, ioConfig)
+        dut.simMakePublicSnapshot()
+        dut
+      })
+      .doSim("testChainShift") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        // --- Round 1: place defect on top-layer vertex v24 and grow ---
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 0))
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(2))
+
+        // Verify pre-shift: v24 has node=0, grown=2, isDefect=true
+        sleep(1)
+        assert(dut.vertices(24).register.node.toLong == 0, "v24 node should be 0 before first shift")
+        assert(dut.vertices(24).register.grown.toLong == 2, "v24 grown should be 2 before first shift")
+        assert(dut.vertices(24).register.isDefect.toBoolean, "v24 should be defect before first shift")
+        // v16 should still be in reset state (virtual, no node)
+        assert(dut.vertices(16).register.node.toLong == config.IndexNone, "v16 node should be IndexNone before first shift")
+        assert(dut.vertices(16).register.grown.toLong == 0, "v16 grown should be 0 before first shift")
+
+        // First ArchiveElasticSlice: shifts v24→v16, v16→v8, v8→v0; v24 resets
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+
+        sleep(1)
+        // v16 should now hold v24's old state (node=0, grown=2, isDefect=true)
+        assert(dut.vertices(16).register.node.toLong == 0, "v16 node should be 0 after first shift (was v24's)")
+        assert(dut.vertices(16).register.grown.toLong == 2, "v16 grown should be 2 after first shift (was v24's)")
+        assert(dut.vertices(16).register.isDefect.toBoolean, "v16 should be defect after first shift")
+        // v24 should be reset (top layer → mode 2)
+        assert(dut.vertices(24).register.node.toLong == config.IndexNone, "v24 node should be IndexNone after first shift (reset)")
+        assert(dut.vertices(24).register.grown.toLong == 0, "v24 grown should be 0 after first shift (reset)")
+        assert(!dut.vertices(24).register.isDefect.toBoolean, "v24 should not be defect after first shift (reset)")
+        // v8 should hold v16's old state (which was reset/virtual before the shift)
+        assert(dut.vertices(8).register.node.toLong == config.IndexNone, "v8 node should be IndexNone after first shift (was v16's reset)")
+        assert(dut.vertices(8).register.grown.toLong == 0, "v8 grown should be 0 after first shift")
+
+        // --- Round 2: place new defect on v24 and grow by 1 ---
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 1))
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+
+        sleep(1)
+        assert(dut.vertices(24).register.node.toLong == 1, "v24 node should be 1 before second shift")
+        assert(dut.vertices(24).register.grown.toLong == 1, "v24 grown should be 1 before second shift")
+
+        // Second ArchiveElasticSlice: shifts again
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+
+        sleep(1)
+        // v8 should now hold what v16 had before the second shift.
+        // Before the second shift, v16 had: node=0, grown=2+1=3 (the Grow(1) also applied to v16 since it has speed=Grow from round 1).
+        // Actually, v16's grown depends on whether its speed was set to Grow.
+        // After the first shift, v16 inherited v24's state: node=0, isDefect=true. The execute stage would have
+        // set speed=Grow because it's a defect. So Grow(1) increments v16.grown from 2 to 3.
+        assert(dut.vertices(8).register.node.toLong == 0, "v8 node should be 0 after second shift (was v16's, originally v24 round 1)")
+        assert(dut.vertices(8).register.grown.toLong == 3, "v8 grown should be 3 after second shift (v16 had 2 + grew 1)")
+
+        // v16 should now hold v24's round-2 state: node=1, grown=1
+        assert(dut.vertices(16).register.node.toLong == 1, "v16 node should be 1 after second shift (was v24 round 2)")
+        assert(dut.vertices(16).register.grown.toLong == 1, "v16 grown should be 1 after second shift (was v24 round 2)")
+
+        // v24 reset again
+        assert(dut.vertices(24).register.node.toLong == config.IndexNone, "v24 should be reset after second shift")
+        assert(dut.vertices(24).register.grown.toLong == 0, "v24 grown should be 0 after second shift")
+
+        // v0 (elastic, layer 0) should hold what v8 had before the second shift.
+        // Before the second shift, v8 had the reset state (node=IndexNone, grown=0) from the first shift.
+        // But Grow(1) may have been applied if v8's speed was Grow. Since v8 had no node (IndexNone),
+        // speed should be Stay, so grown stays 0.
+        assert(dut.vertices(0).register.node.toLong == config.IndexNone,
+          "v0 node should be IndexNone after second shift (was v8's reset state)")
+        assert(dut.vertices(0).register.grown.toLong == 0,
+          "v0 grown should be 0 after second shift (v8 had no node, speed=Stay)")
+
+        // Non-column virtual vertex v1 should be completely unaffected
+        assert(dut.vertices(1).register.isVirtual.toBoolean, "v1 should still be virtual (non-column, unaffected)")
+
+        println("Chain shift test passed")
+        println(dut.simSnapshot().noSpacesSortKeys)
+
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
 }
 
 // sbt "runMain microblossom.modules.DistributedDualTestDebug1"
