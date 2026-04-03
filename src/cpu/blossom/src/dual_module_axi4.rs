@@ -288,8 +288,10 @@ mod tests {
     use crate::dual_module_comb::tests::*;
     use fusion_blossom::example_codes::*;
     use fusion_blossom::util::*;
+    use crate::resources::{MicroBlossomSingle, OffloadingFinder};
     use serde_json::json;
     use std::collections::BTreeSet;
+    use std::fs;
 
     // to use visualization, we need the folder of fusion-blossom repo
     // e.g. export FUSION_DIR=/Users/wuyue/Documents/GitHub/fusion-blossom
@@ -530,6 +532,53 @@ mod tests {
         let visualize_filename = "dual_module_axi4_debug_compare_2.json".to_string();
         let defect_vertices = vec![12, 13, 17, 25, 28, 48, 49];
         dual_module_comb_basic_standard_syndrome(7, visualize_filename, defect_vertices, false, false);
+    }
+
+    /// After `ArchiveElasticSlice`, live state shifts down the layer-fusion column (here v24 → v16)
+    /// while the top vertex resets; matches `DistributedDual` "chain shift" round 1.
+    #[test]
+    fn dual_module_axi4_vertex_shift_archive_elastic_slice() {
+        // KEEP_RTL_FOLDER=1 cargo test dual_module_axi4_vertex_shift_archive_elastic_slice -- --nocapture
+        let graph_path = format!(
+            "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let json = fs::read_to_string(&graph_path)
+            .unwrap_or_else(|e| panic!("read graph {graph_path}: {e}"));
+        let mut graph: MicroBlossomSingle = serde_json::from_str(&json).expect("parse micro blossom graph");
+        graph.offloading = OffloadingFinder::new();
+        let config: DualAxi4Config = serde_json::from_value(json!({
+            "name": "axi4_vertex_shift_archive_elastic",
+            "sim_config": {
+                "with_waveform": false,
+                "dump_debugger_files": false,
+                "support_layer_fusion": true
+            }
+        }))
+        .unwrap();
+        let mut driver = DualModuleAxi4Driver::new(graph, config).unwrap();
+        driver.sanity_check().unwrap();
+        driver.reset();
+        driver.set_maximum_growth(0).unwrap();
+        driver.sanity_check().unwrap();
+        driver
+            .execute_instruction(Instruction32::add_defect_vertex(ni!(24), ni!(0)))
+            .unwrap();
+        driver.execute_instruction(Instruction32::grow(2)).unwrap();
+        driver.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
+        driver.get_single_readout().unwrap();
+        driver.sanity_check().unwrap();
+        let snap = driver.snapshot(false);
+        let verts = snap["vertices"].as_array().expect("snapshot vertices");
+        let v16 = &verts[16];
+        assert_eq!(v16["is_defect"].as_bool(), Some(true));
+        assert_eq!(v16["propagated_dual_node"].as_i64(), Some(0));
+        let v24 = &verts[24];
+        assert_eq!(v24["is_defect"].as_bool(), Some(false));
+        assert!(
+            v24.get("propagated_dual_node").is_none(),
+            "top vertex should have no propagated node after reset (IndexNone omitted in snapshot)"
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub const EXTENDED_OP_CODE_LOAD_WEIGHTS_EXTERNAL: u32 = 0b011 << 3;
 pub const EXTENDED_OP_CODE_RESET: u32 = 0b100 << 3;
 pub const EXTENDED_OP_CODE_LOAD_DEFECTS_EXTERNAL: u32 = 0b101 << 3;
 pub const EXTENDED_OP_CODE_GROW: u32 = 0b110 << 3;
+pub const EXTENDED_OP_CODE_ARCHIVE_ELASTIC_SLICE: u32 = 0b111 << 3;
 
 impl Instruction32 {
     pub fn set_speed(node: CompactNodeIndex, speed: CompactGrowState) -> Self {
@@ -60,6 +61,9 @@ impl Instruction32 {
     }
     pub fn find_obstacle() -> Self {
         Self(EXTENDED_OP_CODE_ENABLE | EXTENDED_OP_CODE_FIND_OBSTACLE)
+    }
+    pub fn archive_elastic_slice() -> Self {
+        Self(EXTENDED_OP_CODE_ENABLE | EXTENDED_OP_CODE_ARCHIVE_ELASTIC_SLICE)
     }
 
     pub fn is_extended(self) -> bool {
