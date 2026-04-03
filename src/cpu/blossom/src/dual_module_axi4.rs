@@ -325,6 +325,38 @@ mod tests {
         );
     }
 
+    /// Same column as `example_phenomenological_rotated_d3` `layer_fusion.layers[*][k]`: layer-3 vertex `top` → layer-2 `receiver` after one slice.
+    fn round1_shift_layer3_to_layer2(sim_name: &str, top: usize, receiver: usize, node: u32, grow_len: u8) {
+        let mut driver = DualModuleAxi4Driver::new(
+            phenom_rotated_d3_graph_layer_fusion(),
+            axi4_config_layer_fusion(sim_name),
+        )
+        .unwrap();
+        driver.reset();
+        driver.set_maximum_growth(0).unwrap();
+        driver
+            .execute_instruction(Instruction32::add_defect_vertex(ni!(top), ni!(node)))
+            .unwrap();
+        driver.execute_instruction(Instruction32::grow(grow_len as i32)).unwrap();
+        driver.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
+        driver.get_single_readout().unwrap();
+        driver.sanity_check().unwrap();
+        let snap = driver.snapshot(false);
+        let verts = snap["vertices"].as_array().expect("snapshot vertices");
+        assert_eq!(
+            verts[receiver]["is_defect"].as_bool(),
+            Some(true),
+            "{sim_name}: v{receiver} defect after shift from v{top}"
+        );
+        assert_eq!(
+            verts[receiver]["propagated_dual_node"].as_i64(),
+            Some(node as i64),
+            "{sim_name}: propagated node"
+        );
+        assert_eq!(verts[top]["is_defect"].as_bool(), Some(false), "{sim_name}: top v{top} reset");
+        assert_no_propagated_node(&verts[top], &format!("v{top}"));
+    }
+
     // to use visualization, we need the folder of fusion-blossom repo
     // e.g. export FUSION_DIR=/Users/wuyue/Documents/GitHub/fusion-blossom
 
@@ -673,6 +705,121 @@ mod tests {
         assert_eq!(verts[0]["is_defect"].as_bool(), Some(false));
         assert_eq!(verts[1]["is_virtual"].as_bool(), Some(true));
         println!("two slices: v8←v16 (node 0), v16←v24 round2 (node 1), v24 reset, v0/v1 ok");
+    }
+
+    // --- Additional layer-fusion column coverage (same graph; indices from `layer_fusion.layers` column order) ---
+
+    #[test]
+    fn dual_module_axi4_vertex_shift_col_27_to_19() {
+        round1_shift_layer3_to_layer2("axi4_shift_col_27_19", 27, 19, 0, 2);
+    }
+
+    #[test]
+    fn dual_module_axi4_vertex_shift_col_28_to_20() {
+        round1_shift_layer3_to_layer2("axi4_shift_col_28_20", 28, 20, 0, 2);
+    }
+
+    #[test]
+    fn dual_module_axi4_vertex_shift_col_31_to_23() {
+        round1_shift_layer3_to_layer2("axi4_shift_col_31_23", 31, 23, 0, 2);
+    }
+
+    #[test]
+    fn dual_module_axi4_vertex_shift_col_24_grow_1() {
+        round1_shift_layer3_to_layer2("axi4_shift_24_grow1", 24, 16, 0, 1);
+    }
+
+    #[test]
+    fn dual_module_axi4_vertex_shift_col_24_dual_node_5() {
+        round1_shift_layer3_to_layer2("axi4_shift_24_node5", 24, 16, 5, 2);
+    }
+
+    #[test]
+    fn dual_module_axi4_vertex_shift_col_31_dual_node_2_grow_3() {
+        round1_shift_layer3_to_layer2("axi4_shift_31_n2_g3", 31, 23, 2, 3);
+    }
+
+    /// Before any archive, the defect must still live on the layer-3 vertex only.
+    #[test]
+    fn dual_module_axi4_vertex_shift_pre_archive_snapshot_v24() {
+        let mut driver = DualModuleAxi4Driver::new(
+            phenom_rotated_d3_graph_layer_fusion(),
+            axi4_config_layer_fusion("axi4_shift_pre_archive"),
+        )
+        .unwrap();
+        driver.reset();
+        driver.set_maximum_growth(0).unwrap();
+        driver
+            .execute_instruction(Instruction32::add_defect_vertex(ni!(24), ni!(0)))
+            .unwrap();
+        driver.execute_instruction(Instruction32::grow(2)).unwrap();
+        driver.get_single_readout().unwrap();
+        let snap = driver.snapshot(false);
+        let verts = snap["vertices"].as_array().expect("snapshot vertices");
+        assert_eq!(verts[24]["is_defect"].as_bool(), Some(true));
+        assert_eq!(verts[24]["propagated_dual_node"].as_i64(), Some(0));
+        assert_eq!(verts[16]["is_defect"].as_bool(), Some(false));
+        assert_no_propagated_node(&verts[16], "v16");
+    }
+
+    /// Second `ArchiveElasticSlice` with no new defect on v24: v8 receives former v16, v16 receives v24’s reset bucket.
+    #[test]
+    fn dual_module_axi4_vertex_shift_second_slice_no_new_top_defect() {
+        let mut driver = DualModuleAxi4Driver::new(
+            phenom_rotated_d3_graph_layer_fusion(),
+            axi4_config_layer_fusion("axi4_shift_2nd_no_top"),
+        )
+        .unwrap();
+        driver.reset();
+        driver.set_maximum_growth(0).unwrap();
+        driver
+            .execute_instruction(Instruction32::add_defect_vertex(ni!(24), ni!(0)))
+            .unwrap();
+        driver.execute_instruction(Instruction32::grow(2)).unwrap();
+        driver.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
+        driver.get_single_readout().unwrap();
+        driver.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
+        driver.get_single_readout().unwrap();
+        driver.sanity_check().unwrap();
+        let snap = driver.snapshot(false);
+        let verts = snap["vertices"].as_array().expect("snapshot vertices");
+        assert_eq!(verts[8]["is_defect"].as_bool(), Some(true));
+        assert_eq!(verts[8]["propagated_dual_node"].as_i64(), Some(0));
+        assert_eq!(verts[16]["is_defect"].as_bool(), Some(false));
+        assert_no_propagated_node(&verts[16], "v16");
+        assert_eq!(verts[24]["is_defect"].as_bool(), Some(false));
+        assert_no_propagated_node(&verts[24], "v24");
+    }
+
+    /// No defect: repeated archives should not trip the error counter.
+    #[test]
+    fn dual_module_axi4_vertex_shift_triple_archive_idle() {
+        let mut driver = DualModuleAxi4Driver::new(
+            phenom_rotated_d3_graph_layer_fusion(),
+            axi4_config_layer_fusion("axi4_shift_triple_idle"),
+        )
+        .unwrap();
+        driver.reset();
+        driver.set_maximum_growth(0).unwrap();
+        for _ in 0..3 {
+            driver.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
+            driver.get_single_readout().unwrap();
+            driver.sanity_check().unwrap();
+        }
+    }
+
+    #[test]
+    fn dual_module_axi4_vertex_shift_hardware_info_layer_fusion() {
+        let mut driver = DualModuleAxi4Driver::new(
+            phenom_rotated_d3_graph_layer_fusion(),
+            axi4_config_layer_fusion("axi4_shift_hw_layer_fusion"),
+        )
+        .unwrap();
+        let info = driver.get_hardware_info().unwrap();
+        assert!(
+            info.flags.contains(MicroBlossomHardwareFlags::SUPPORT_LAYER_FUSION),
+            "hardware info should report SUPPORT_LAYER_FUSION when sim_config enables it"
+        );
     }
 
     #[test]
