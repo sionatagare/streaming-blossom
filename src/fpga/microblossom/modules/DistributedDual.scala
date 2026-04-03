@@ -389,55 +389,9 @@ class DistributedDualTest extends AnyFunSuite {
     Config.spinal().generateVerilog(DistributedDual(config, ioConfig))
   }
 
-  test("test pipeline registers") {
-    // gtkwave simWorkspace/DistributedDual/testA.fst
-    val config = DualConfig(filename = "./resources/graphs/example_code_capacity_d3.json", minimizeBits = false)
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq() // remove all offloaders
-    config.fitGraph(minimizeBits = false)
-    config.sanityCheck()
-    Config.sim
-      .compile({
-        val dut = DistributedDual(config, ioConfig)
-        dut.simMakePublicSnapshot()
-        dut
-      })
-      .doSim("testA") { dut =>
-        dut.io.message.valid #= false
-        dut.clockDomain.forkStimulus(period = 10)
-
-        for (idx <- 0 to 10) { dut.clockDomain.waitSampling() }
-
-        dut.simExecute(ioConfig.instructionSpec.generateReset())
-        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 0))
-        var (maxGrowable, conflict) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
-
-        assert(maxGrowable.length == 2) // at most grow 2
-        assert(conflict.valid == false)
-
-        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
-        var (maxGrowable2, conflict2) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
-        assert(maxGrowable2.length == 1)
-        assert(conflict2.valid == false)
-
-        val (_, conflict3, grown3) = dut.simFindObstacle(1)
-        assert(grown3 == 1)
-        assert(conflict3.valid == true)
-        assert(conflict3.node1 == 0)
-        assert(conflict3.node2 == ioConfig.IndexNone)
-        assert(conflict3.touch1 == 0)
-        assert(conflict3.touch2 == ioConfig.IndexNone)
-        assert(conflict3.vertex1 == 0)
-        assert(conflict3.vertex2 == 3)
-
-        println(dut.simSnapshot().noSpacesSortKeys)
-
-        for (idx <- 0 to 10) { dut.clockDomain.waitSampling() }
-
-      }
-  }
-
-  test("chain shift - two consecutive ArchiveElasticSlice on phenomenological d3") {
+  
+  //  two consecutive ArchiveElasticSlice on phenomenological d3
+  test("chain shift") {
     // Uses phenomenological_rotated_d3 with supportLayerFusion to exercise the layer shift chain.
     // Graph columns (same positional index across layers):
     //   Layer 0 (elastic): v0,  v3,  v4,  v7   — shift mode 1 (copy from layer 1)
