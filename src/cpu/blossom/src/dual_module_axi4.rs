@@ -539,6 +539,9 @@ mod tests {
     #[test]
     fn dual_module_axi4_vertex_shift_archive_elastic_slice() {
         // KEEP_RTL_FOLDER=1 cargo test dual_module_axi4_vertex_shift_archive_elastic_slice -- --nocapture
+        println!(
+            "AXI4 vertex shift: layer-fusion column (v24→v16); after ArchiveElasticSlice expect v16 holds former v24 defect (node 0), v24 reset"
+        );
         let graph_path = format!(
             "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
             env!("CARGO_MANIFEST_DIR")
@@ -578,6 +581,9 @@ mod tests {
         assert!(
             v24.get("propagated_dual_node").is_none(),
             "top vertex should have no propagated node after reset (IndexNone omitted in snapshot)"
+        );
+        println!(
+            "vertex shift (ArchiveElasticSlice): v24 live state moved to v16 (defect, node=0); v24 reset — ok"
         );
     }
 
