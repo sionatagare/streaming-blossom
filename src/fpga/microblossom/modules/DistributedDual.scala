@@ -200,10 +200,13 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
 
   // before compiling the simulator, mark the fields as public to enable snapshot
   def simMakePublicSnapshot() = {
-    vertices.foreach(vertex => {
+    vertices.zipWithIndex.foreach { case (vertex, idx) =>
       vertex.register.simPublic()
       vertex.io.simPublic()
-    })
+      if (firstLayerVertexIndices.contains(idx)) {
+        vertex.layers.simPublic()
+      }
+    }
     edges.foreach(edge => {
       if (!config.hardCodeWeights) {
         edge.register.simPublic()
@@ -239,6 +242,27 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       }
     }
     (maxGrowable, conflict, grown)
+  }
+
+  /// Decode one word of `Mem[VertexState]` as written on `ArchiveElasticSlice` for elastic (layer-0) vertices.
+  /// Packing matches Spinal `Bundle` order with the first field at the LSB: speed, node, root, isVirtual, isDefect, grown.
+  def decodeElasticLayersMemWord(word: BigInt, vertexIndex: Int): (Long, Long, Boolean, Boolean, Long) = {
+    val vb = config.vertexBits
+    val gb = config.grownBitsOf(vertexIndex)
+    var w = word
+    def take(bits: Int): BigInt = {
+      val mask = (BigInt(1) << bits) - 1
+      val v = w & mask
+      w = w >> bits
+      v
+    }
+    take(2) // speed
+    val node = take(vb).toLong
+    val root = take(vb).toLong
+    val isVirtual = take(1) != 0
+    val isDefect = take(1) != 0
+    val grown = take(gb).toLong
+    (node, root, isVirtual, isDefect, grown)
   }
 
   // take a snapshot of the dual module, in the format of fusion blossom visualization
@@ -325,12 +349,28 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       }
       jsonEdges.append(Json.fromFields(edgeMap))
     })
-    Json.fromFields(
-      Map(
-        "vertices" -> Json.fromValues(jsonVertices),
-        "edges" -> Json.fromValues(jsonEdges)
-      )
+    var snapshotMap = Map[String, Json](
+      "vertices" -> Json.fromValues(jsonVertices),
+      "edges" -> Json.fromValues(jsonEdges)
     )
+    if (!abbrev && config.numLayers > 0) {
+      val layerEntries = firstLayerVertexIndices.toSeq.sorted.map { vi =>
+        val word = vertices(vi).layers.getBigInt(0L)
+        val (node, root, isVirt, isDef, grown) = decodeElasticLayersMemWord(word, vi)
+        Json.fromFields(
+          Seq(
+            "vertex" -> Json.fromInt(vi),
+            "node" -> Json.fromLong(node),
+            "root" -> Json.fromLong(root),
+            "is_virtual" -> Json.fromBoolean(isVirt),
+            "is_defect" -> Json.fromBoolean(isDef),
+            "grown" -> Json.fromLong(grown)
+          )
+        )
+      }
+      snapshotMap = snapshotMap + ("elastic_layers" -> Json.fromValues(layerEntries))
+    }
+    Json.fromFields(snapshotMap)
   }
 
   def simMakePublicPreMatching() = {
@@ -491,6 +531,13 @@ class DistributedDualTest extends AnyFunSuite {
         dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
 
         sleep(1)
+        // Elastic v0: `layers` BRAM captures pre-shift live `register` on ArchiveElasticSlice (idle here).
+        val w0 = dut.vertices(0).layers.getBigInt(0L)
+        val (layN0, layR0, _, layD0, layG0) = dut.decodeElasticLayersMemWord(w0, 0)
+        assert(
+          layN0 == config.IndexNone && layR0 == config.IndexNone && !layD0 && layG0 == 0,
+          s"elastic v0 layers RAM should hold idle snapshot (node=$layN0 root=$layR0 defect=$layD0 grown=$layG0)"
+        )
         // v16 should now hold v24's old state (node=0, grown=2, isDefect=true)
         assert(dut.vertices(16).register.node.toLong == 0, "v16 node should be 0 after first shift (was v24's)")
         assert(dut.vertices(16).register.grown.toLong == 2, "v16 grown should be 2 after first shift (was v24's)")
