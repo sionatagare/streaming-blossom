@@ -437,7 +437,7 @@ class DistributedDualTest extends AnyFunSuite {
       }
   }
 
-  test("chain shift — two consecutive ArchiveElasticSlice on phenomenological d3") {
+  test("chain shift - two consecutive ArchiveElasticSlice on phenomenological d3") {
     // Uses phenomenological_rotated_d3 with supportLayerFusion to exercise the layer shift chain.
     // Graph columns (same positional index across layers):
     //   Layer 0 (elastic): v0,  v3,  v4,  v7   — shift mode 1 (copy from layer 1)
