@@ -289,9 +289,41 @@ mod tests {
     use fusion_blossom::example_codes::*;
     use fusion_blossom::util::*;
     use crate::resources::{MicroBlossomSingle, OffloadingFinder};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::BTreeSet;
     use std::fs;
+
+    /// Phenomenological rotated d=3 graph with layer fusion; offloaders cleared (matches Scala `chain shift` setup).
+    fn phenom_rotated_d3_graph_layer_fusion() -> MicroBlossomSingle {
+        let graph_path = format!(
+            "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let json = fs::read_to_string(&graph_path)
+            .unwrap_or_else(|e| panic!("read graph {graph_path}: {e}"));
+        let mut graph: MicroBlossomSingle = serde_json::from_str(&json).expect("parse micro blossom graph");
+        graph.offloading = OffloadingFinder::new();
+        graph
+    }
+
+    fn axi4_config_layer_fusion(name: &str) -> DualAxi4Config {
+        serde_json::from_value(json!({
+            "name": name,
+            "sim_config": {
+                "with_waveform": false,
+                "dump_debugger_files": false,
+                "support_layer_fusion": true
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_no_propagated_node(v: &Value, label: &str) {
+        assert!(
+            v.get("propagated_dual_node").is_none(),
+            "{label}: expected no propagated_dual_node (IndexNone)"
+        );
+    }
 
     // to use visualization, we need the folder of fusion-blossom repo
     // e.g. export FUSION_DIR=/Users/wuyue/Documents/GitHub/fusion-blossom
@@ -542,24 +574,11 @@ mod tests {
         println!(
             "AXI4 vertex shift: layer-fusion column (v24→v16); after ArchiveElasticSlice expect v16 holds former v24 defect (node 0), v24 reset"
         );
-        let graph_path = format!(
-            "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let json = fs::read_to_string(&graph_path)
-            .unwrap_or_else(|e| panic!("read graph {graph_path}: {e}"));
-        let mut graph: MicroBlossomSingle = serde_json::from_str(&json).expect("parse micro blossom graph");
-        graph.offloading = OffloadingFinder::new();
-        let config: DualAxi4Config = serde_json::from_value(json!({
-            "name": "axi4_vertex_shift_archive_elastic",
-            "sim_config": {
-                "with_waveform": false,
-                "dump_debugger_files": false,
-                "support_layer_fusion": true
-            }
-        }))
+        let mut driver = DualModuleAxi4Driver::new(
+            phenom_rotated_d3_graph_layer_fusion(),
+            axi4_config_layer_fusion("axi4_vertex_shift_archive_elastic"),
+        )
         .unwrap();
-        let mut driver = DualModuleAxi4Driver::new(graph, config).unwrap();
         driver.sanity_check().unwrap();
         driver.reset();
         driver.set_maximum_growth(0).unwrap();
@@ -578,13 +597,82 @@ mod tests {
         assert_eq!(v16["propagated_dual_node"].as_i64(), Some(0));
         let v24 = &verts[24];
         assert_eq!(v24["is_defect"].as_bool(), Some(false));
-        assert!(
-            v24.get("propagated_dual_node").is_none(),
-            "top vertex should have no propagated node after reset (IndexNone omitted in snapshot)"
-        );
+        assert_no_propagated_node(v24, "v24");
         println!(
             "vertex shift (ArchiveElasticSlice): v24 live state moved to v16 (defect, node=0); v24 reset — ok"
         );
+    }
+
+    /// First `ArchiveElasticSlice` moves the whole column: v8 ← old v16 (empty), v0 ← old v8 (empty); off-column v1 stays virtual.
+    #[test]
+    fn dual_module_axi4_vertex_shift_round1_full_column() {
+        // cargo test dual_module_axi4_vertex_shift_round1_full_column -- --nocapture
+        println!("AXI4 vertex shift round1: assert v8/v0 receive empty column state; v1 unchanged virtual");
+        let mut driver = DualModuleAxi4Driver::new(
+            phenom_rotated_d3_graph_layer_fusion(),
+            axi4_config_layer_fusion("axi4_vertex_shift_round1_column"),
+        )
+        .unwrap();
+        driver.reset();
+        driver.set_maximum_growth(0).unwrap();
+        driver
+            .execute_instruction(Instruction32::add_defect_vertex(ni!(24), ni!(0)))
+            .unwrap();
+        driver.execute_instruction(Instruction32::grow(2)).unwrap();
+        driver.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
+        driver.get_single_readout().unwrap();
+        driver.sanity_check().unwrap();
+        let snap = driver.snapshot(false);
+        let verts = snap["vertices"].as_array().expect("snapshot vertices");
+        assert_eq!(verts[16]["is_defect"].as_bool(), Some(true));
+        assert_eq!(verts[16]["propagated_dual_node"].as_i64(), Some(0));
+        assert_eq!(verts[24]["is_defect"].as_bool(), Some(false));
+        assert_no_propagated_node(&verts[24], "v24");
+        assert_no_propagated_node(&verts[8], "v8");
+        assert_eq!(verts[8]["is_defect"].as_bool(), Some(false));
+        assert_no_propagated_node(&verts[0], "v0");
+        assert_eq!(verts[0]["is_defect"].as_bool(), Some(false));
+        assert_eq!(verts[1]["is_virtual"].as_bool(), Some(true));
+        println!("round1 full column: v8/v0 empty, v1 still virtual — ok");
+    }
+
+    /// Two consecutive `ArchiveElasticSlice`s with a second defect on v24; matches Scala `chain shift` rounds 1–2 (snapshot-visible fields).
+    #[test]
+    fn dual_module_axi4_vertex_shift_two_archive_slices() {
+        // cargo test dual_module_axi4_vertex_shift_two_archive_slices -- --nocapture
+        println!("AXI4 vertex shift: two ArchiveElasticSlice ops (chain shift rounds 1–2)");
+        let mut driver = DualModuleAxi4Driver::new(
+            phenom_rotated_d3_graph_layer_fusion(),
+            axi4_config_layer_fusion("axi4_vertex_shift_two_slices"),
+        )
+        .unwrap();
+        driver.reset();
+        driver.set_maximum_growth(0).unwrap();
+        driver
+            .execute_instruction(Instruction32::add_defect_vertex(ni!(24), ni!(0)))
+            .unwrap();
+        driver.execute_instruction(Instruction32::grow(2)).unwrap();
+        driver.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
+        driver.get_single_readout().unwrap();
+        driver
+            .execute_instruction(Instruction32::add_defect_vertex(ni!(24), ni!(1)))
+            .unwrap();
+        driver.execute_instruction(Instruction32::grow(1)).unwrap();
+        driver.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
+        driver.get_single_readout().unwrap();
+        driver.sanity_check().unwrap();
+        let snap = driver.snapshot(false);
+        let verts = snap["vertices"].as_array().expect("snapshot vertices");
+        assert_eq!(verts[8]["is_defect"].as_bool(), Some(true));
+        assert_eq!(verts[8]["propagated_dual_node"].as_i64(), Some(0));
+        assert_eq!(verts[16]["is_defect"].as_bool(), Some(true));
+        assert_eq!(verts[16]["propagated_dual_node"].as_i64(), Some(1));
+        assert_eq!(verts[24]["is_defect"].as_bool(), Some(false));
+        assert_no_propagated_node(&verts[24], "v24");
+        assert_no_propagated_node(&verts[0], "v0");
+        assert_eq!(verts[0]["is_defect"].as_bool(), Some(false));
+        assert_eq!(verts[1]["is_virtual"].as_bool(), Some(true));
+        println!("two slices: v8←v16 (node 0), v16←v24 round2 (node 1), v24 reset, v0/v1 ok");
     }
 
     #[test]
