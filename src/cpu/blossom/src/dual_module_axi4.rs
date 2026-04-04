@@ -294,11 +294,6 @@ mod tests {
     use std::fs;
 
     /// Phenomenological rotated d=3 graph with layer fusion; offloaders cleared (matches Scala `chain shift` setup).
-    ///
-    /// Elastic `layers` BRAM after `ArchiveElasticSlice` is checked in SpinalSim only: sbt
-    /// `DistributedDual` test `"chain shift"` uses `vertices(0).layers.getBigInt` and
-    /// `decodeElasticLayersMemWord` — `Mem.getBigInt` must not run from `MicroBlossomHost` `snapshot()`
-    /// (hosted Verilator path NPE / unsupported).
     fn phenom_rotated_d3_graph_layer_fusion() -> MicroBlossomSingle {
         let graph_path = format!(
             "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
