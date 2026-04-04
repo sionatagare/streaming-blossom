@@ -203,6 +203,10 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     vertices.foreach(vertex => {
       vertex.register.simPublic()
       vertex.io.simPublic()
+      if (vertex.elastic) {
+        vertex.layersDebugAddr.simPublic()
+        vertex.layersDebugData.simPublic()
+      }
     })
     edges.foreach(edge => {
       if (!config.hardCodeWeights) {
@@ -557,14 +561,7 @@ class DistributedDualTest extends AnyFunSuite {
 
   test("elastic layers RAM") {
     // Verifies that ArchiveElasticSlice writes the elastic vertex's pre-shift live state
-    // into its `layers` BRAM. Uses phenomenological_rotated_d3 with a single context.
-    //
-    // Column of v0 (elastic): [v0, v8, v16, v24]
-    // After Reset + AddDefect(v0, 0) + LoadDefectsExternal(0) + Grow(1):
-    //   v0 has node=0, grown=1, isDefect=true, speed=Grow
-    // After ArchiveElasticSlice:
-    //   v0.layers[0] should contain the pre-shift state (node=0, grown=1, isDefect=true)
-    //   v0's live register should now hold v8's old state (reset/virtual)
+    // into its `layers` BRAM by reading it back via a simulation-only debug read port.
     //
     // gtkwave simWorkspace/DistributedDual/testLayersCommit.fst
     val config = DualConfig(
@@ -577,26 +574,6 @@ class DistributedDualTest extends AnyFunSuite {
     config.fitGraph(minimizeBits = false)
     config.contextDepth = 1
     config.sanityCheck()
-
-    // VertexState bundle layout (LSB-first in SpinalHDL declaration order):
-    //   speed:     2 bits
-    //   node:      vertexBits
-    //   root:      vertexBits
-    //   isVirtual: 1 bit
-    //   isDefect:  1 bit
-    //   grown:     grownBits
-    val vertexBits = config.vertexBits
-    val grownBits = config.grownBitsOf(0)
-    def decodeVertexState(raw: BigInt): (Long, Long, Long, Boolean, Boolean, Long) = {
-      var pos = 0
-      val speed = ((raw >> pos) & ((BigInt(1) << 2) - 1)).toLong; pos += 2
-      val node = ((raw >> pos) & ((BigInt(1) << vertexBits) - 1)).toLong; pos += vertexBits
-      val root = ((raw >> pos) & ((BigInt(1) << vertexBits) - 1)).toLong; pos += vertexBits
-      val isVirtual = ((raw >> pos) & 1) == 1; pos += 1
-      val isDefect = ((raw >> pos) & 1) == 1; pos += 1
-      val grown = ((raw >> pos) & ((BigInt(1) << grownBits) - 1)).toLong
-      (speed, node, root, isVirtual, isDefect, grown)
-    }
 
     Config.sim
       .compile({
@@ -622,37 +599,43 @@ class DistributedDualTest extends AnyFunSuite {
         assert(dut.vertices(0).register.grown.toLong == 1, "v0 grown should be 1 before archive")
         assert(dut.vertices(0).register.isDefect.toBoolean, "v0 should be defect before archive")
 
-        // Archive: saves v0's live state to layers[0], then shifts v8's state into v0's register
+        // Archive: v0's state (node=0, grown=1) -> layers[0], v0.register <- v8's reset state
         dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
         sleep(1)
 
-        // Read layers[0] via simulation backdoor
-        val raw = dut.vertices(0).layers.getBigInt(0)
-        val (speed, node, root, isVirtual, isDefect, grown) = decodeVertexState(raw)
-
-        // layers[0] should hold v0's pre-shift state
-        assert(node == 0, s"layers[0] node should be 0, got $node")
-        assert(root == 0, s"layers[0] root should be 0, got $root")
-        assert(isDefect, s"layers[0] isDefect should be true")
-        assert(grown == 1, s"layers[0] grown should be 1, got $grown")
-        assert(speed == Speed.Grow, s"layers[0] speed should be Grow (${Speed.Grow}), got $speed")
-        // v0 was non-virtual after LoadDefectsExternal(0)
-        assert(!isVirtual, s"layers[0] isVirtual should be false")
-
-        // v0's live register should now hold v8's old state (reset/virtual)
+        // v0's live register should now hold v8's old state (reset)
         assert(dut.vertices(0).register.node.toLong == config.IndexNone,
-          "v0 live register node should be IndexNone after archive (was v8's reset)")
+          "v0 register node should be IndexNone after archive (shifted from v8)")
         assert(dut.vertices(0).register.grown.toLong == 0,
-          "v0 live register grown should be 0 after archive")
+          "v0 register grown should be 0 after archive")
 
-        // Also verify v3 (another elastic vertex) — it was idle, so layers[0] should hold its reset state
-        val raw3 = dut.vertices(3).layers.getBigInt(0)
-        val grownBits3 = config.grownBitsOf(3)
-        // Use same decoder (vertexBits is the same, grownBits may differ but for phenomenological d3 they're equal)
-        val (speed3, node3, _, _, isDefect3, grown3) = decodeVertexState(raw3)
-        assert(node3 == config.IndexNone, s"v3 layers[0] node should be IndexNone, got $node3")
-        assert(grown3 == 0, s"v3 layers[0] grown should be 0, got $grown3")
-        assert(!isDefect3, s"v3 layers[0] isDefect should be false")
+        // Read layers[0] via the debug read port
+        dut.vertices(0).layersDebugAddr #= 0
+        sleep(1)
+        val layNode = dut.vertices(0).layersDebugData.node.toLong
+        val layRoot = dut.vertices(0).layersDebugData.root.toLong
+        val layDefect = dut.vertices(0).layersDebugData.isDefect.toBoolean
+        val layGrown = dut.vertices(0).layersDebugData.grown.toLong
+        val laySpeed = dut.vertices(0).layersDebugData.speed.toLong
+        val layVirtual = dut.vertices(0).layersDebugData.isVirtual.toBoolean
+
+        assert(layNode == 0, s"layers[0] node should be 0, got $layNode")
+        assert(layRoot == 0, s"layers[0] root should be 0, got $layRoot")
+        assert(layDefect, s"layers[0] isDefect should be true")
+        assert(layGrown == 1, s"layers[0] grown should be 1, got $layGrown")
+        assert(laySpeed == Speed.Grow, s"layers[0] speed should be Grow, got $laySpeed")
+        assert(!layVirtual, s"layers[0] isVirtual should be false")
+
+        // Also verify v3 (another elastic vertex, was idle) — layers[0] should hold its reset state
+        dut.vertices(3).layersDebugAddr #= 0
+        sleep(1)
+        val lay3Node = dut.vertices(3).layersDebugData.node.toLong
+        val lay3Grown = dut.vertices(3).layersDebugData.grown.toLong
+        val lay3Defect = dut.vertices(3).layersDebugData.isDefect.toBoolean
+
+        assert(lay3Node == config.IndexNone, s"v3 layers[0] node should be IndexNone, got $lay3Node")
+        assert(lay3Grown == 0, s"v3 layers[0] grown should be 0, got $lay3Grown")
+        assert(!lay3Defect, s"v3 layers[0] isDefect should be false")
 
         println("Layers commit test passed")
 

@@ -110,6 +110,13 @@ case class Vertex(
     layers.setTechnology(ramBlock)
   }
 
+  // Simulation-only debug read port for `layers` BRAM.
+  val layersDebugAddr = if (elastic) UInt(log2Up(elasticLayersDepth) max 1 bits) else null
+  val layersDebugData = if (elastic) VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)) else null
+  if (elastic) {
+    layersDebugData := layers.readAsync(layersDebugAddr)
+  }
+
   stages.offloadSet.message := message
   stages.offloadSet.state := Mux(message.isReset, VertexState.resetValue(config, vertexIndex), fetchState)
 
