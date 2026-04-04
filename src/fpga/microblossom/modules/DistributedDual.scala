@@ -349,28 +349,15 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       }
       jsonEdges.append(Json.fromFields(edgeMap))
     })
-    var snapshotMap = Map[String, Json](
-      "vertices" -> Json.fromValues(jsonVertices),
-      "edges" -> Json.fromValues(jsonEdges)
+    // Do not read `Mem[VertexState]` (`layers`) here: `Mem.getBigInt` is not supported in the
+    // MicroBlossomBus / Verilator hosted path (NPE / wrong thread). Elastic `layers` checks live in
+    // standalone `DistributedDual` sim tests (e.g. "chain shift") via `decodeElasticLayersMemWord`.
+    Json.fromFields(
+      Map(
+        "vertices" -> Json.fromValues(jsonVertices),
+        "edges" -> Json.fromValues(jsonEdges)
+      )
     )
-    if (!abbrev && config.numLayers > 0) {
-      val layerEntries = firstLayerVertexIndices.toSeq.sorted.map { vi =>
-        val word = vertices(vi).layers.getBigInt(0L)
-        val (node, root, isVirt, isDef, grown) = decodeElasticLayersMemWord(word, vi)
-        Json.fromFields(
-          Seq(
-            "vertex" -> Json.fromInt(vi),
-            "node" -> Json.fromLong(node),
-            "root" -> Json.fromLong(root),
-            "is_virtual" -> Json.fromBoolean(isVirt),
-            "is_defect" -> Json.fromBoolean(isDef),
-            "grown" -> Json.fromLong(grown)
-          )
-        )
-      }
-      snapshotMap = snapshotMap + ("elastic_layers" -> Json.fromValues(layerEntries))
-    }
-    Json.fromFields(snapshotMap)
   }
 
   def simMakePublicPreMatching() = {
@@ -516,6 +503,9 @@ class DistributedDualTest extends AnyFunSuite {
         // --- Round 1: place defect on top-layer vertex v24 and grow ---
         dut.simExecute(ioConfig.instructionSpec.generateReset())
         dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 0))
+        // LoadDefectsExternal clears isVirtual for layer-fusion vertices so they can grow.
+        // v24 is in layer 3 (layerId=3).
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
         dut.simExecute(ioConfig.instructionSpec.generateGrow(2))
 
         // Verify pre-shift: v24 has node=0, grown=2, isDefect=true
@@ -552,6 +542,8 @@ class DistributedDualTest extends AnyFunSuite {
 
         // --- Round 2: place new defect on v24 and grow by 1 ---
         dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 1))
+        // v24 was reset by the shift (mode 2), so isVirtual=true again. Un-virtualize it.
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
         dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
 
         sleep(1)

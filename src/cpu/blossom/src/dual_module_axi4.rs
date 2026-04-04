@@ -294,6 +294,11 @@ mod tests {
     use std::fs;
 
     /// Phenomenological rotated d=3 graph with layer fusion; offloaders cleared (matches Scala `chain shift` setup).
+    ///
+    /// Elastic `layers` BRAM after `ArchiveElasticSlice` is checked in SpinalSim only: sbt
+    /// `DistributedDual` test `"chain shift"` uses `vertices(0).layers.getBigInt` and
+    /// `decodeElasticLayersMemWord` — `Mem.getBigInt` must not run from `MicroBlossomHost` `snapshot()`
+    /// (hosted Verilator path NPE / unsupported).
     fn phenom_rotated_d3_graph_layer_fusion() -> MicroBlossomSingle {
         let graph_path = format!(
             "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
@@ -820,51 +825,6 @@ mod tests {
             info.flags.contains(MicroBlossomHardwareFlags::SUPPORT_LAYER_FUSION),
             "hardware info should report SUPPORT_LAYER_FUSION when sim_config enables it"
         );
-    }
-
-    /// `ArchiveElasticSlice` commits each elastic (layer-0) vertex's pre-update live state into `layers` BRAM;
-    /// `snapshot(false)` exposes it as `elastic_layers` (see `DistributedDual.simSnapshot`).
-    #[test]
-    fn dual_module_axi4_vertex_shift_elastic_layers_ram_after_archive() {
-        // cargo test dual_module_axi4_vertex_shift_elastic_layers_ram_after_archive -- --nocapture
-        let mut driver = DualModuleAxi4Driver::new(
-            phenom_rotated_d3_graph_layer_fusion(),
-            axi4_config_layer_fusion("axi4_shift_elastic_layers_ram"),
-        )
-        .unwrap();
-        let info = driver.get_hardware_info().unwrap();
-        let index_none = (1i64 << info.vertex_bits) - 1;
-        driver.reset();
-        driver.set_maximum_growth(0).unwrap();
-        driver
-            .execute_instruction(Instruction32::add_defect_vertex(ni!(24), ni!(0)))
-            .unwrap();
-        driver.execute_instruction(Instruction32::grow(2)).unwrap();
-        driver.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
-        driver.get_single_readout().unwrap();
-        driver.sanity_check().unwrap();
-        let snap = driver.snapshot(false);
-        let layers = snap["elastic_layers"]
-            .as_array()
-            .expect("elastic_layers in snapshot(false) when graph has layer fusion");
-        assert_eq!(layers.len(), 4, "phenomenological d3 layer-0 has four elastic vertices");
-        for entry in layers {
-            let vi = entry["vertex"].as_u64().expect("vertex index") as usize;
-            assert!(
-                matches!(vi, 0 | 3 | 4 | 7),
-                "unexpected elastic vertex index {}",
-                vi
-            );
-        }
-        let v0 = layers
-            .iter()
-            .find(|e| e["vertex"].as_u64() == Some(0))
-            .expect("elastic entry for v0");
-        assert_eq!(v0["node"].as_i64(), Some(index_none), "v0 layers snapshot: idle node");
-        assert_eq!(v0["root"].as_i64(), Some(index_none));
-        assert_eq!(v0["is_defect"].as_bool(), Some(false));
-        assert_eq!(v0["grown"].as_i64(), Some(0));
-        assert_eq!(v0["is_virtual"].as_bool(), Some(true));
     }
 
     #[test]
