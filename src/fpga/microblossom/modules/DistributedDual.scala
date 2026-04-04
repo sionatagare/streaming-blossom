@@ -643,6 +643,370 @@ class DistributedDualTest extends AnyFunSuite {
       }
   }
 
+  test("basic shift - states move down one layer") {
+    // After Reset + AddDefect(v24, 0) + LoadDefectsExternal(3) + Grow(2), issue ArchiveElasticSlice.
+    // Verify each layer received its donor's state:
+    //   v16 <- v24's old state (node=0, grown=2, isDefect=true)
+    //   v8  <- v16's old state (reset/virtual)
+    //   v0  <- v8's old state  (reset/virtual)
+    //   v24 <- reset (top layer, mode 2)
+    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 1
+    config.sanityCheck()
+    Config.sim
+      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
+      .doSim("testBasicShift") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 0))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(2))
+
+        sleep(1)
+        // Pre-shift sanity
+        assert(dut.vertices(24).register.node.toLong == 0)
+        assert(dut.vertices(24).register.grown.toLong == 2)
+        assert(dut.vertices(24).register.isDefect.toBoolean)
+        assert(dut.vertices(16).register.node.toLong == config.IndexNone)
+        assert(dut.vertices(8).register.node.toLong == config.IndexNone)
+        assert(dut.vertices(0).register.node.toLong == config.IndexNone)
+
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        sleep(1)
+
+        // v16 got v24's state
+        assert(dut.vertices(16).register.node.toLong == 0, "v16 should have v24's node=0")
+        assert(dut.vertices(16).register.grown.toLong == 2, "v16 should have v24's grown=2")
+        assert(dut.vertices(16).register.isDefect.toBoolean, "v16 should have v24's isDefect")
+        assert(!dut.vertices(16).register.isVirtual.toBoolean, "v16 should inherit v24's isVirtual=false")
+
+        // v8 got v16's old state (was virtual, no node)
+        assert(dut.vertices(8).register.node.toLong == config.IndexNone, "v8 should have v16's old reset node")
+        assert(dut.vertices(8).register.grown.toLong == 0, "v8 should have v16's old grown=0")
+
+        // v0 got v8's old state (was virtual, no node)
+        assert(dut.vertices(0).register.node.toLong == config.IndexNone, "v0 should have v8's old reset node")
+        assert(dut.vertices(0).register.grown.toLong == 0, "v0 should have v8's old grown=0")
+
+        // v24 was reset (mode 2)
+        assert(dut.vertices(24).register.node.toLong == config.IndexNone, "v24 should be reset")
+        assert(dut.vertices(24).register.grown.toLong == 0, "v24 grown should be 0 after reset")
+        assert(!dut.vertices(24).register.isDefect.toBoolean, "v24 isDefect should be false after reset")
+
+        // v0's layers should hold v0's pre-shift state (idle/reset)
+        dut.vertices(0).layersDebugAddr #= 0
+        sleep(1)
+        assert(dut.vertices(0).layersDebugData.node.toLong == config.IndexNone, "v0 layers[0] should hold reset node")
+        assert(dut.vertices(0).layersDebugData.grown.toLong == 0, "v0 layers[0] should hold grown=0")
+
+        println("Basic shift test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
+  test("holdForArchive prevents propagation during shift") {
+    // Setup: make v12 a defect and grow until the edge v12-v4 is tight, so v4
+    // would normally propagate v12's node via VertexPostUpdateState.
+    // Then issue ArchiveElasticSlice. During the archive cycle, holdForArchive is true,
+    // so v4 should NOT propagate — it should receive its donor v12's state via the shift
+    // instead.
+    //
+    // Edge v4-v12 is edge 13 with weight=2. After Grow(1), both sides grow by 1.
+    // v12 has grown=1 (speed=Grow from AddDefect). v4 has grown=0 (no node, speed=Stay).
+    // Edge remaining = 2 - 1 - 0 = 1, not tight.
+    // After Grow(2): v12 grown=2. Edge remaining = 2 - 2 - 0 = 0, tight.
+    // Now v4 would normally propagate v12's node. But during ArchiveElasticSlice, holdForArchive
+    // blocks this — v4's state after the archive should be its donor's (v12's pre-shift) state,
+    // not a propagated state.
+    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 1
+    config.sanityCheck()
+    Config.sim
+      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
+      .doSim("testHoldForArchive") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(12, 0))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(1))
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(2))
+
+        sleep(1)
+        // v12 should have node=0, grown=2
+        assert(dut.vertices(12).register.node.toLong == 0, "v12 node should be 0")
+        assert(dut.vertices(12).register.grown.toLong == 2, "v12 grown should be 2")
+        // v4 should have propagated node from v12 via tight edge (grown=0, propagator valid)
+        // After Grow(2), the pipeline would have run VertexPostUpdateState on v4:
+        //   v4.grown=0, not defect, not virtual -> propagation applies
+        //   edge v4-v12 tight -> propagator picks up v12's node=0
+        // So v4 should have node=0 now
+        assert(dut.vertices(4).register.node.toLong == 0, "v4 should have propagated node=0 from v12")
+
+        // Now issue ArchiveElasticSlice. During this cycle, holdForArchive prevents propagation.
+        // v4 (mode=1, donor=v12) gets v12's pre-shift state via the shift chain.
+        // v12's pre-shift state: node=0, grown=2, isDefect=true, speed=Grow
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        sleep(1)
+
+        // v4 should now hold v12's pre-shift state (from the shift), NOT a propagated result
+        assert(dut.vertices(4).register.node.toLong == 0, "v4 should hold v12's shifted node=0")
+        assert(dut.vertices(4).register.grown.toLong == 2, "v4 should hold v12's shifted grown=2")
+        assert(dut.vertices(4).register.isDefect.toBoolean, "v4 should hold v12's shifted isDefect=true")
+
+        // v12 (mode=1, donor=v20) should hold v20's old state (reset)
+        assert(dut.vertices(12).register.node.toLong == config.IndexNone, "v12 should hold v20's reset node")
+        assert(dut.vertices(12).register.grown.toLong == 0, "v12 should hold v20's reset grown=0")
+
+        println("holdForArchive test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
+  test("non-column vertices unaffected by ArchiveElasticSlice") {
+    // Virtual vertices not in any layer column (v1, v2, v5, v6, v9, v10, v13, v14, etc.)
+    // should have archShiftMode=0 and be completely unchanged by ArchiveElasticSlice.
+    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 1
+    config.sanityCheck()
+    Config.sim
+      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
+      .doSim("testNonColumnUnaffected") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+
+        // Capture state of non-column vertices before archive
+        sleep(1)
+        val nonColumnVertices = Seq(1, 2, 5, 6, 9, 10, 13, 14, 17, 18, 21, 22, 25, 26, 29, 30)
+        val beforeStates = nonColumnVertices.map { vi =>
+          (vi,
+           dut.vertices(vi).register.node.toLong,
+           dut.vertices(vi).register.root.toLong,
+           dut.vertices(vi).register.grown.toLong,
+           dut.vertices(vi).register.isVirtual.toBoolean,
+           dut.vertices(vi).register.isDefect.toBoolean,
+           dut.vertices(vi).register.speed.toLong)
+        }
+
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        sleep(1)
+
+        // Verify all non-column vertices are unchanged
+        for ((vi, bNode, bRoot, bGrown, bVirtual, bDefect, bSpeed) <- beforeStates) {
+          assert(dut.vertices(vi).register.node.toLong == bNode, s"v$vi node changed")
+          assert(dut.vertices(vi).register.root.toLong == bRoot, s"v$vi root changed")
+          assert(dut.vertices(vi).register.grown.toLong == bGrown, s"v$vi grown changed")
+          assert(dut.vertices(vi).register.isVirtual.toBoolean == bVirtual, s"v$vi isVirtual changed")
+          assert(dut.vertices(vi).register.isDefect.toBoolean == bDefect, s"v$vi isDefect changed")
+          assert(dut.vertices(vi).register.speed.toLong == bSpeed, s"v$vi speed changed")
+        }
+
+        println("Non-column unaffected test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
+  test("shift with context switching") {
+    // With contextDepth=2, ArchiveElasticSlice on context 0 should not affect context 1.
+    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 2
+    config.sanityCheck()
+    Config.sim
+      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
+      .doSim("testContextShift") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        def simExecuteCtx(instruction: Long, ctx: Int) = {
+          dut.io.message.valid #= true
+          dut.io.message.instruction #= instruction
+          dut.io.message.contextId #= ctx
+          dut.clockDomain.waitSampling()
+          dut.io.message.valid #= false
+          for (_ <- 0 until config.readLatency - 1) { dut.clockDomain.waitSampling() }
+          sleep(1)
+        }
+
+        // Reset both contexts
+        simExecuteCtx(ioConfig.instructionSpec.generateReset(), 0)
+        simExecuteCtx(ioConfig.instructionSpec.generateReset(), 1)
+
+        // Context 0: AddDefect(v24, 0) + grow
+        simExecuteCtx(ioConfig.instructionSpec.generateAddDefect(24, 0), 0)
+        simExecuteCtx(ioConfig.instructionSpec.generateLoadDefectsExternal(3), 0)
+        simExecuteCtx(ioConfig.instructionSpec.generateGrow(1), 0)
+
+        // Context 1: AddDefect(v24, 1) + grow more
+        simExecuteCtx(ioConfig.instructionSpec.generateAddDefect(24, 1), 1)
+        simExecuteCtx(ioConfig.instructionSpec.generateLoadDefectsExternal(3), 1)
+        simExecuteCtx(ioConfig.instructionSpec.generateGrow(2), 1)
+
+        // Archive context 0 only
+        simExecuteCtx(ioConfig.instructionSpec.generateArchiveElasticSlice(), 0)
+
+        // Fetch context 0 state (need a FindObstacle or similar to trigger a read from ram)
+        // Actually, we can read the ram via readAsync in the existing shift logic.
+        // But registers only hold the last-written context. We need to trigger a fetch for each context.
+        // Issue a no-op FindObstacle to load context 1 into the pipeline, then check registers.
+        simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 1)
+
+        // After fetching context 1: v24 should still have node=1, grown=2 (context 1 untouched)
+        assert(dut.vertices(24).register.node.toLong == 1, "ctx1 v24 node should be 1 (untouched)")
+        assert(dut.vertices(24).register.grown.toLong == 2, "ctx1 v24 grown should be 2 (untouched)")
+
+        // Now fetch context 0 to verify the shift happened
+        simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 0)
+
+        // Context 0: v24 should be reset (mode 2)
+        assert(dut.vertices(24).register.node.toLong == config.IndexNone, "ctx0 v24 should be reset after archive")
+        assert(dut.vertices(24).register.grown.toLong == 0, "ctx0 v24 grown should be 0 after archive")
+        // Context 0: v16 should hold v24's old ctx0 state (node=0, grown=1)
+        assert(dut.vertices(16).register.node.toLong == 0, "ctx0 v16 should have v24's old node=0")
+        assert(dut.vertices(16).register.grown.toLong == 1, "ctx0 v16 should have v24's old grown=1")
+
+        // Now archive context 1
+        simExecuteCtx(ioConfig.instructionSpec.generateArchiveElasticSlice(), 1)
+        simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 1)
+
+        // Context 1: v16 should hold v24's old ctx1 state (node=1, grown=2)
+        assert(dut.vertices(16).register.node.toLong == 1, "ctx1 v16 should have v24's old node=1")
+        assert(dut.vertices(16).register.grown.toLong == 2, "ctx1 v16 should have v24's old grown=2")
+
+        println("Context switching shift test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
+  test("shift preserves spatial edge tightness") {
+    // Two adjacent top-layer defects v24 and v27. After growing, edge v24-v27 (edge 52, weight=2)
+    // becomes tight. After ArchiveElasticSlice, the states shift to v16 and v19.
+    // Edge v16-v19 (edge 35, weight=2) should detect a conflict between the two shifted clusters.
+    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 1
+    config.sanityCheck()
+    Config.sim
+      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
+      .doSim("testShiftTightness") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 0))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(27, 1))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
+
+        // Grow by 1: both grow. Edge 52 (v24-v27, w=2): remaining = 2-1-1 = 0 -> tight -> conflict
+        val (_, conflict, grown) = dut.simFindObstacle(1)
+        assert(conflict.valid, "should have conflict between v24 and v27")
+        assert(grown == 1, s"should grow by 1, got $grown")
+
+        // Shift: v24->v16, v27->v19
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        sleep(1)
+
+        // v16 should have node=0, grown=1; v19 should have node=1, grown=1
+        assert(dut.vertices(16).register.node.toLong == 0, "v16 should have node=0 from v24")
+        assert(dut.vertices(16).register.grown.toLong == 1, "v16 should have grown=1 from v24")
+        assert(dut.vertices(19).register.node.toLong == 1, "v19 should have node=1 from v27")
+        assert(dut.vertices(19).register.grown.toLong == 1, "v19 should have grown=1 from v27")
+
+        // FindObstacle should detect the conflict on edge v16-v19 (edge 35, w=2): 1+1=2 >= 2
+        val (maxGrowable2, conflict2) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+        assert(conflict2.valid, "should detect conflict between shifted clusters on v16-v19")
+        // The conflict should involve nodes 0 and 1
+        val nodes = Set(conflict2.node1, conflict2.node2)
+        assert(nodes.contains(0) && nodes.contains(1),
+          s"conflict should involve nodes 0 and 1, got ${conflict2.node1} and ${conflict2.node2}")
+
+        println("Shift tightness test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
+  test("multiple archives fill layers correctly") {
+    // Issue 3 rounds of AddDefect + Grow + ArchiveElasticSlice with different node IDs and
+    // growth amounts. Since contextDepth=1 there is only 1 layers slot, so each archive
+    // overwrites the previous. Verify via layersDebugData that layers[0] always holds the
+    // most recently archived state.
+    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 1
+    config.sanityCheck()
+    Config.sim
+      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
+      .doSim("testMultipleArchives") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+
+        for (round <- 0 until 3) {
+          // Each round: put defect on v0 with node=round, grow by (round+1)
+          dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, round))
+          dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
+          dut.simExecute(ioConfig.instructionSpec.generateGrow(round + 1))
+
+          sleep(1)
+          val preNode = dut.vertices(0).register.node.toLong
+          val preGrown = dut.vertices(0).register.grown.toLong
+          assert(preNode == round, s"round $round: v0 node should be $round before archive, got $preNode")
+          assert(preGrown == round + 1, s"round $round: v0 grown should be ${round + 1} before archive, got $preGrown")
+
+          dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+          sleep(1)
+
+          // layers[0] should hold this round's pre-shift state
+          dut.vertices(0).layersDebugAddr #= 0
+          sleep(1)
+          val layNode = dut.vertices(0).layersDebugData.node.toLong
+          val layGrown = dut.vertices(0).layersDebugData.grown.toLong
+          assert(layNode == round, s"round $round: layers[0] node should be $round, got $layNode")
+          assert(layGrown == round + 1, s"round $round: layers[0] grown should be ${round + 1}, got $layGrown")
+
+          // v0's register should now hold v8's state (reset each time since v8 keeps getting
+          // reset states shifted down from above)
+          assert(dut.vertices(0).register.node.toLong == config.IndexNone,
+            s"round $round: v0 register should be reset after archive")
+        }
+
+        println("Multiple archives test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
 }
 
 // sbt "runMain microblossom.modules.DistributedDualTestDebug1"
