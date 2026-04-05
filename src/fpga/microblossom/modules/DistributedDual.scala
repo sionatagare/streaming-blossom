@@ -744,15 +744,15 @@ class DistributedDualTest extends AnyFunSuite {
         dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(1))
         dut.simExecute(ioConfig.instructionSpec.generateGrow(2))
 
+        // Issue FindObstacle to trigger a second pipeline pass where v4 sees
+        // v12's updated grown=2, making edge v4-v12 tight and enabling propagation.
+        dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+
         sleep(1)
         // v12 should have node=0, grown=2
         assert(dut.vertices(12).register.node.toLong == 0, "v12 node should be 0")
         assert(dut.vertices(12).register.grown.toLong == 2, "v12 grown should be 2")
-        // v4 should have propagated node from v12 via tight edge (grown=0, propagator valid)
-        // After Grow(2), the pipeline would have run VertexPostUpdateState on v4:
-        //   v4.grown=0, not defect, not virtual -> propagation applies
-        //   edge v4-v12 tight -> propagator picks up v12's node=0
-        // So v4 should have node=0 now
+        // v4 should have propagated node from v12 via tight edge after FindObstacle
         assert(dut.vertices(4).register.node.toLong == 0, "v4 should have propagated node=0 from v12")
 
         // Now issue ArchiveElasticSlice. During this cycle, holdForArchive prevents propagation.
