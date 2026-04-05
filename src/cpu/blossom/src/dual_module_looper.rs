@@ -269,7 +269,8 @@ mod tests {
         let mut dual: DualModuleLooper = DualModuleStackless::new(
             DualDriverTracked::new(DualModuleLooperDriver::new(graph.clone(), config).unwrap()),
         );
-        let mut primal: PrimalModuleEmbedded<MAX_NODE_NUM> = PrimalModuleEmbedded::new();
+        let mut primal: Box<PrimalModuleEmbedded<MAX_NODE_NUM>> =
+            stacker::grow(MAX_NODE_NUM * 256, || Box::new(PrimalModuleEmbedded::new()));
         primal.nodes.blossom_begin = graph.vertex_num;
         if let Some(lf) = graph.layer_fusion.as_ref() {
             for vertex_index in 0..graph.vertex_num {
