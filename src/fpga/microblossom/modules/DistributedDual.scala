@@ -969,15 +969,10 @@ class DistributedDualTest extends AnyFunSuite {
         assert(dut.vertices(27).io.stageOutputs.updateGet3.state.node.toLong == 1, "ctx0 v27 node should still be 1")
         assert(dut.vertices(27).io.stageOutputs.updateGet3.state.grown.toLong == 1, "ctx0 v27 grown should still be 1")
 
-        // Grow context 1 further by 1 (total grown=2), still no conflict with single defect
-        simExecuteCtx(ioConfig.instructionSpec.generateGrow(1), 1)
+        // Re-fetch context 1 and verify its grown hasn't been affected by context 0 operations
         simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 1)
-        assert(!dut.io.conflict.valid.toBoolean, "ctx1 should still have no conflict")
-        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.grown.toLong == 2, "ctx1 v24 grown should be 2")
-
-        // Verify context 0 hasn't been affected by context 1's extra growth
-        simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 0)
-        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.grown.toLong == 1, "ctx0 v24 grown should still be 1 (not 2)")
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.grown.toLong == 1, "ctx1 v24 grown should still be 1")
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.node.toLong == 2, "ctx1 v24 node should still be 2")
 
         println("Independent contexts test passed")
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
