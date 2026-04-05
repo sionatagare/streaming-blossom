@@ -80,6 +80,9 @@ impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualStacklessDr
 
     fn archive_elastic_slice(&mut self) {
         self.driver.archive_elastic_slice();
+        // Clear blossom tracker: the archive shifts all dual variables in hardware,
+        // so any tracked blossom state is now stale.
+        self.blossom_tracker.clear();
     }
 }
 
