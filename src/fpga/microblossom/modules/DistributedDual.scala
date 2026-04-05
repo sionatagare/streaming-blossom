@@ -741,7 +741,9 @@ class DistributedDualTest extends AnyFunSuite {
 
         dut.simExecute(ioConfig.instructionSpec.generateReset())
         dut.simExecute(ioConfig.instructionSpec.generateAddDefect(12, 0))
+        // Clear isVirtual for both layer 1 (v12) and layer 0 (v4) so v4 can propagate
         dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(1))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
         dut.simExecute(ioConfig.instructionSpec.generateGrow(2))
 
         // Issue FindObstacle to trigger a second pipeline pass where v4 sees
