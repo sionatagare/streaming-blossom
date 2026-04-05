@@ -299,6 +299,13 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   accMaxGrowable.length.init(accMaxGrowable.length.maxValue)
   val accConflict = Reg(ConvergecastConflict(config.vertexBits))
   accConflict.valid.init(False)
+  val convergecastConflictBitsInit = B(0, config.vertexBits bits)
+  accConflict.node1.init(convergecastConflictBitsInit)
+  accConflict.node2.init(convergecastConflictBitsInit)
+  accConflict.touch1.init(convergecastConflictBitsInit)
+  accConflict.touch2.init(convergecastConflictBitsInit)
+  accConflict.vertex1.init(convergecastConflictBitsInit)
+  accConflict.vertex2.init(convergecastConflictBitsInit)
 
   // Reset accumulators when scan starts
   when(io.edgeScanActive && io.edgeScanIndex === 0) {
@@ -333,6 +340,12 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   liveMaxGrowableReg.length.init(liveMaxGrowableReg.length.maxValue)
   val liveConflictReg = Reg(ConvergecastConflict(config.vertexBits))
   liveConflictReg.valid.init(False)
+  liveConflictReg.node1.init(convergecastConflictBitsInit)
+  liveConflictReg.node2.init(convergecastConflictBitsInit)
+  liveConflictReg.touch1.init(convergecastConflictBitsInit)
+  liveConflictReg.touch2.init(convergecastConflictBitsInit)
+  liveConflictReg.vertex1.init(convergecastConflictBitsInit)
+  liveConflictReg.vertex2.init(convergecastConflictBitsInit)
   when(stages.updateGet3.compact.valid) {
     liveMaxGrowableReg := edgeResponse.io.maxGrowable
     liveConflictReg := edgeResponse.io.conflict
