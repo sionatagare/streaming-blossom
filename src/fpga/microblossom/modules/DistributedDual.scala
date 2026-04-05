@@ -904,6 +904,86 @@ class DistributedDualTest extends AnyFunSuite {
       }
   }
 
+  test("independent contexts grow and conflict separately") {
+    // With contextDepth=2, two contexts each place defects on different vertices and grow
+    // independently. Verify that FindObstacle returns the correct conflict for each context
+    // and that growth in one context does not leak into the other.
+    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 2
+    config.sanityCheck()
+    Config.sim
+      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
+      .doSim("testIndependentContexts") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        def simExecuteCtx(instruction: Long, ctx: Int) = {
+          dut.io.message.valid #= true
+          dut.io.message.instruction #= instruction
+          dut.io.message.contextId #= ctx
+          dut.clockDomain.waitSampling()
+          dut.io.message.valid #= false
+          for (_ <- 0 until config.readLatency - 1) { dut.clockDomain.waitSampling() }
+          sleep(1)
+        }
+
+        // Reset both contexts
+        simExecuteCtx(ioConfig.instructionSpec.generateReset(), 0)
+        simExecuteCtx(ioConfig.instructionSpec.generateReset(), 1)
+
+        // Context 0: two adjacent defects on v24 and v27 (edge 52, weight=2)
+        simExecuteCtx(ioConfig.instructionSpec.generateAddDefect(24, 0), 0)
+        simExecuteCtx(ioConfig.instructionSpec.generateAddDefect(27, 1), 0)
+        simExecuteCtx(ioConfig.instructionSpec.generateLoadDefectsExternal(3), 0)
+
+        // Context 1: single defect on v24 only — no conflict possible
+        simExecuteCtx(ioConfig.instructionSpec.generateAddDefect(24, 2), 1)
+        simExecuteCtx(ioConfig.instructionSpec.generateLoadDefectsExternal(3), 1)
+
+        // Grow context 0 by 1 — edge 52 becomes tight (w=2, 1+1=2), expect conflict
+        simExecuteCtx(ioConfig.instructionSpec.generateGrow(1), 0)
+        simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 0)
+        assert(dut.io.conflict.valid.toBoolean, "ctx0 should have conflict between v24 and v27")
+        val ctx0Nodes = Set(dut.io.conflict.node1.toInt, dut.io.conflict.node2.toInt)
+        assert(ctx0Nodes.contains(0) && ctx0Nodes.contains(1),
+          s"ctx0 conflict should involve nodes 0 and 1, got $ctx0Nodes")
+
+        // Grow context 1 by 1 — only one defect, no conflict
+        simExecuteCtx(ioConfig.instructionSpec.generateGrow(1), 1)
+        simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 1)
+        assert(!dut.io.conflict.valid.toBoolean, "ctx1 should have no conflict with single defect")
+
+        // Verify context 1 state: v24 should have node=2, grown=1
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.node.toLong == 2, "ctx1 v24 node should be 2")
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.grown.toLong == 1, "ctx1 v24 grown should be 1")
+
+        // Fetch context 0 and verify its state is still intact (grown=1 from earlier)
+        simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 0)
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.node.toLong == 0, "ctx0 v24 node should still be 0")
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.grown.toLong == 1, "ctx0 v24 grown should still be 1")
+        assert(dut.vertices(27).io.stageOutputs.updateGet3.state.node.toLong == 1, "ctx0 v27 node should still be 1")
+        assert(dut.vertices(27).io.stageOutputs.updateGet3.state.grown.toLong == 1, "ctx0 v27 grown should still be 1")
+
+        // Grow context 1 further by 1 (total grown=2), still no conflict with single defect
+        simExecuteCtx(ioConfig.instructionSpec.generateGrow(1), 1)
+        simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 1)
+        assert(!dut.io.conflict.valid.toBoolean, "ctx1 should still have no conflict")
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.grown.toLong == 2, "ctx1 v24 grown should be 2")
+
+        // Verify context 0 hasn't been affected by context 1's extra growth
+        simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 0)
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.grown.toLong == 1, "ctx0 v24 grown should still be 1 (not 2)")
+
+        println("Independent contexts test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
   test("shift preserves spatial edge tightness") {
     // Two adjacent top-layer defects v24 and v27. After growing, edge v24-v27 (edge 52, weight=2)
     // becomes tight. After ArchiveElasticSlice, the states shift to v16 and v19.
