@@ -233,11 +233,6 @@ pub trait SolverTrackedDual: DualStacklessDriver + DualTrackedDriver + FusionVis
     fn generate_profiler_report(&self) -> serde_json::Value {
         json!({})
     }
-    /// fuse one layer of defects (in this simulation, the defects are still loaded using `AddDefectVertex`,
-    /// but real hardware should be able to load from some channel)
-    fn fuse_layer(&mut self, _layer_id: usize) {
-        unimplemented!()
-    }
     fn get_pre_matchings(&self, _belonging: DualModuleInterfaceWeak) -> PerfectMatching {
         Default::default()
     }
@@ -369,7 +364,7 @@ impl<Dual: SolverTrackedDual> PrimalDualSolver for SolverEmbeddedBoxed<Dual> {
             if self.sim_config.support_layer_fusion {
                 let num_layers = self.graph.layer_fusion.as_ref().unwrap().num_layers;
                 if self.layer_id < num_layers {
-                    self.dual_module.driver.driver.fuse_layer(self.layer_id);
+                    self.dual_module.driver.driver.fuse_layer(self.layer_id as CompactLayerNum);
                     self.primal_module.fuse_layer(
                         self.dual_module.as_mut(),
                         CompactLayerId::new(self.layer_id as CompactLayerNum).unwrap(),

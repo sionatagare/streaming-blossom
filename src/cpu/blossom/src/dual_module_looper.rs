@@ -40,10 +40,6 @@ impl SolverTrackedDual for DualModuleLooperDriver {
     fn new_from_graph_config(graph: MicroBlossomSingle, config: serde_json::Value) -> Self {
         Self::new(graph, serde_json::from_value(config).unwrap()).unwrap()
     }
-    fn fuse_layer(&mut self, layer_id: usize) {
-        self.execute_instruction(Instruction32::load_syndrome_external(ni!(layer_id)), self.context_id)
-            .unwrap();
-    }
     fn get_pre_matchings(&self, belonging: DualModuleInterfaceWeak) -> PerfectMatching {
         self.client.get_pre_matchings(belonging)
     }
@@ -161,6 +157,14 @@ impl DualStacklessDriver for DualModuleLooperDriver {
         self.execute_instruction(Instruction32::add_defect_vertex(vertex, node), self.context_id)
             .unwrap();
     }
+    fn fuse_layer(&mut self, layer_id: CompactLayerNum) {
+        self.execute_instruction(Instruction32::load_syndrome_external(ni!(layer_id)), self.context_id)
+            .unwrap();
+    }
+    fn archive_elastic_slice(&mut self) {
+        self.execute_instruction(Instruction32::archive_elastic_slice(), self.context_id)
+            .unwrap();
+    }
 }
 
 impl DualTrackedDriver for DualModuleLooperDriver {
@@ -235,6 +239,95 @@ mod tests {
         let defect_vertices = vec![1, 5, 8];
         let config = json!({ "support_offloading": true });
         dual_module_looper_basic_standard_syndrome(3, visualize_filename, defect_vertices, config);
+    }
+
+    /// Streaming decode: multiple measurement rounds arrive one at a time.
+    /// Each round: load defects on top layer, fuse, solve to completion, archive.
+    /// The primal module persists across rounds (no reset). After all rounds, the
+    /// CPU must still be in a consistent state and the decoder must not panic or stall.
+    #[test]
+    fn dual_module_looper_streaming_decode() {
+        // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_streaming_decode -- --nocapture
+        use micro_blossom_nostd::primal_module_embedded::*;
+        use micro_blossom_nostd::util::*;
+
+        let graph_path = format!(
+            "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let json_str = std::fs::read_to_string(&graph_path)
+            .unwrap_or_else(|e| panic!("read graph {graph_path}: {e}"));
+        let mut graph: MicroBlossomSingle = serde_json::from_str(&json_str).expect("parse graph");
+        graph.offloading = crate::resources::OffloadingFinder::new();
+
+        let config: DualLooperConfig = serde_json::from_value(json!({
+            "name": "looper_streaming_decode",
+            "sim_config": { "support_layer_fusion": true }
+        }))
+        .unwrap();
+
+        let mut dual: DualModuleLooper = DualModuleStackless::new(
+            DualDriverTracked::new(DualModuleLooperDriver::new(graph.clone(), config).unwrap()),
+        );
+        let mut primal: PrimalModuleEmbedded<MAX_NODE_NUM> = PrimalModuleEmbedded::new();
+        primal.nodes.blossom_begin = graph.vertex_num;
+        if let Some(lf) = graph.layer_fusion.as_ref() {
+            for vertex_index in 0..graph.vertex_num {
+                if let Some(&layer_id) = lf.vertex_layer_id.get(&vertex_index) {
+                    primal.layer_fusion.vertex_layer_id[vertex_index] =
+                        CompactLayerId::new(layer_id as CompactLayerNum);
+                }
+            }
+        }
+
+        // Each inner vec is one measurement round's defect vertices (top-layer vertices).
+        // Node indices are assigned incrementally across rounds.
+        let measurement_rounds: Vec<Vec<usize>> = vec![
+            vec![24],       // round 0: single defect
+            vec![27],       // round 1: different vertex
+            vec![24, 27],   // round 2: two defects — will produce a conflict
+            vec![],         // round 3: empty measurement (no defects)
+            vec![28],       // round 4: another round after empty — CPU must keep going
+        ];
+
+        let top_layer: CompactLayerNum = 3;
+        let mut node_offset: usize = 0;
+
+        for (round, defects) in measurement_rounds.iter().enumerate() {
+            // Load this round's defects
+            for (i, &vertex) in defects.iter().enumerate() {
+                dual.add_defect(ni!(vertex), ni!(node_offset + i));
+            }
+
+            // Fuse the top layer (clears isVirtual, enables those vertices)
+            dual.fuse_layer(top_layer);
+            primal.fuse_layer(&mut dual, CompactLayerId::new(top_layer).unwrap());
+
+            // Solve: find and resolve obstacles until none remain
+            let (mut obstacle, _) = dual.find_obstacle();
+            while !obstacle.is_none() {
+                primal.resolve(&mut dual, obstacle);
+                (obstacle, _) = dual.find_obstacle();
+            }
+
+            // Archive: shift state down, reset top layer for next measurement
+            dual.archive_elastic_slice();
+
+            node_offset += defects.len();
+            println!("round {round}: decoded {} defect(s), total nodes so far: {node_offset}", defects.len());
+        }
+
+        // Final check: the system is still alive — issue one more round after all the above
+        dual.add_defect(ni!(24), ni!(node_offset));
+        dual.fuse_layer(top_layer);
+        primal.fuse_layer(&mut dual, CompactLayerId::new(top_layer).unwrap());
+        let (mut obstacle, _) = dual.find_obstacle();
+        while !obstacle.is_none() {
+            primal.resolve(&mut dual, obstacle);
+            (obstacle, _) = dual.find_obstacle();
+        }
+        dual.archive_elastic_slice();
+        println!("final round: decoded successfully after {} prior rounds — streaming decode ok", measurement_rounds.len());
     }
 
     pub fn dual_module_looper_basic_standard_syndrome(

@@ -32,6 +32,12 @@ impl DualStacklessDriver for DualDriver {
     fn add_defect(&mut self, vertex: CompactVertexIndex, node: CompactNodeIndex) {
         unsafe { execute_instruction(Instruction32::add_defect_vertex(vertex, node).0, self.context_id) };
     }
+    fn fuse_layer(&mut self, layer_id: CompactLayerNum) {
+        unsafe { execute_instruction(Instruction32::load_syndrome_external(ni!(layer_id)).0, self.context_id) };
+    }
+    fn archive_elastic_slice(&mut self) {
+        unsafe { execute_instruction(Instruction32::archive_elastic_slice().0, self.context_id) };
+    }
 }
 
 impl DualTrackedDriver for DualDriver {

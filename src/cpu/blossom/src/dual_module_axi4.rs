@@ -40,10 +40,6 @@ impl SolverTrackedDual for DualModuleAxi4Driver {
     fn new_from_graph_config(graph: MicroBlossomSingle, config: serde_json::Value) -> Self {
         Self::new(graph, serde_json::from_value(config).unwrap()).unwrap()
     }
-    fn fuse_layer(&mut self, layer_id: usize) {
-        self.execute_instruction(Instruction32::load_syndrome_external(ni!(layer_id)))
-            .unwrap();
-    }
     fn get_pre_matchings(&self, belonging: DualModuleInterfaceWeak) -> PerfectMatching {
         self.client.get_pre_matchings(belonging)
     }
@@ -258,6 +254,13 @@ impl DualStacklessDriver for DualModuleAxi4Driver {
     fn add_defect(&mut self, vertex: CompactVertexIndex, node: CompactNodeIndex) {
         self.execute_instruction(Instruction32::add_defect_vertex(vertex, node))
             .unwrap();
+    }
+    fn fuse_layer(&mut self, layer_id: CompactLayerNum) {
+        self.execute_instruction(Instruction32::load_syndrome_external(ni!(layer_id)))
+            .unwrap();
+    }
+    fn archive_elastic_slice(&mut self) {
+        self.execute_instruction(Instruction32::archive_elastic_slice()).unwrap();
     }
 }
 

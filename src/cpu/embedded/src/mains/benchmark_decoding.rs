@@ -12,6 +12,7 @@ use micro_blossom_nostd::instruction::*;
 use micro_blossom_nostd::interface::*;
 use micro_blossom_nostd::latency_benchmarker::*;
 use micro_blossom_nostd::primal_module_embedded::*;
+use micro_blossom_nostd::util::*;
 #[allow(unused_imports)]
 use num_traits::float::FloatCore;
 
@@ -45,6 +46,9 @@ pub const IGNORE_EMPTY_DEFECT: bool = option_env!("IGNORE_EMPTY_DEFECT").is_some
 pub const MAX_ROUND: usize = unwrap_ctx!(parse_usize(option::unwrap_or!(option_env!("MAX_ROUND"), "0")));
 /// disabling the detail print will significantly speed up the process
 pub const DISABLE_DETAIL_PRINT: bool = option_env!("DISABLE_DETAIL_PRINT").is_some();
+/// streaming mode: each measurement is loaded, solved, and archived individually
+/// without a full reset between rounds; primal state persists across measurements
+pub const USE_STREAMING: bool = option_env!("USE_STREAMING").is_some();
 
 static mut PRIMAL_MODULE: UnsafeCell<PrimalModuleEmbedded<MAX_NODE_NUM>> = UnsafeCell::new(PrimalModuleEmbedded::new());
 static mut DUAL_MODULE: UnsafeCell<DualModuleStackless<DualDriverTracked<DualDriver, MAX_NODE_NUM>>> =
@@ -62,6 +66,7 @@ pub fn main() {
     println!("IGNORE_EMPTY_DEFECT: {IGNORE_EMPTY_DEFECT:?}");
     println!("MAX_ROUND: {MAX_ROUND:?}");
     println!("DISABLE_DETAIL_PRINT: {DISABLE_DETAIL_PRINT:?}");
+    println!("USE_STREAMING: {USE_STREAMING:?}");
     println!("-------- end of build parameters --------");
 
     // obtain hardware information
@@ -109,82 +114,131 @@ pub fn main() {
     let cpu_wall_benchmarker = unsafe { CPU_WALL_BENCHMARKER.get().as_mut().unwrap() };
     let all_begin_native_time = unsafe { extern_c::get_native_time() };
     let mut last_native_time = unsafe { extern_c::get_native_time() };
+    // the top layer id for streaming mode: defects are always loaded on the top layer
+    let top_layer_id = if USE_STREAMING { NUM_LAYER_FUSION - 1 } else { 0 };
+    let mut streaming_node_offset: usize = 0;
+
     while let Some(defects) = defects_reader.next() {
         if IGNORE_EMPTY_DEFECT && defects.is_empty() {
             continue;
         }
         unsafe { extern_c::clear_instruction_counter() };
-        // reset and load defects
-        for (node_index, &vertex_index) in defects.iter().enumerate() {
-            dual_module.add_defect(ni!(vertex_index), ni!(node_index));
-        }
-        let mut layer_id = 0;
-        if !USE_LAYER_FUSION {
-            // load all layers except for 1
-            for layer_id in 0..NUM_LAYER_FUSION - 1 {
-                unsafe {
-                    extern_c::execute_instruction(Instruction32::load_syndrome_external(ni!(layer_id)).into(), context_id)
-                };
+
+        if USE_STREAMING {
+            // Streaming mode: load new measurement's defects on the top layer, solve, archive.
+            // Primal state persists across measurements — no full reset.
+            // Node indices are offset so each measurement gets unique node IDs.
+            for (i, &vertex_index) in defects.iter().enumerate() {
+                dual_module.add_defect(ni!(vertex_index), ni!(streaming_node_offset + i));
             }
-            layer_id = NUM_LAYER_FUSION - 1;
-        };
-        // start timer and set up load stall emulator: the syndrome won't be loaded until this time has passed
-        let native_start = unsafe { extern_c::get_native_time() };
-        let fast_start = unsafe { extern_c::get_fast_cpu_time() };
-        let syndrome_start = native_start + syndrome_start_delay_cycle; // wait for setting up everything
-        let syndrome_finish = syndrome_start + finish_delta;
-        unsafe { extern_c::setup_load_stall_emulator(syndrome_start, interval, context_id) };
-        // solve it
-        while layer_id < NUM_LAYER_FUSION {
-            unsafe {
-                extern_c::execute_instruction(Instruction32::load_syndrome_external(ni!(layer_id)).into(), context_id)
-            };
-            layer_id += 1;
-            if USE_LAYER_FUSION && MULTIPLE_FUSION {
-                // fuse multiple layers at once if it can be done without any stall
-                let duration_ns = unsafe { extern_c::get_fast_cpu_duration_ns(fast_start) };
-                while duration_ns > syndrome_start_delay_ns + (layer_id as u64) * (MEASUREMENT_CYCLE_NS as u64)
-                    && layer_id < NUM_LAYER_FUSION
-                {
+            // Load the top layer to clear isVirtual for top-layer vertices
+            dual_module.fuse_layer(top_layer_id as CompactLayerNum);
+            // Break virtual matchings on the primal side for this layer
+            primal_module.fuse_layer(
+                dual_module,
+                CompactLayerId::new(top_layer_id as CompactLayerNum).unwrap(),
+            );
+
+            let fast_start = unsafe { extern_c::get_fast_cpu_time() };
+
+            // Solve until no obstacle remains
+            let (mut obstacle, _) = dual_module.find_obstacle();
+            while !obstacle.is_none() {
+                primal_module.resolve(dual_module, obstacle);
+                (obstacle, _) = dual_module.find_obstacle();
+            }
+
+            // Archive: shifts layer state down, resets top layer for next measurement
+            dual_module.archive_elastic_slice();
+
+            let cpu_wall_diff = (unsafe { extern_c::get_fast_cpu_duration_ns(fast_start) } as f64) * 1e-9;
+            let counter = unsafe { extern_c::get_instruction_counter() };
+            if !DISABLE_DETAIL_PRINT {
+                println!(
+                    "[{}] counter: {counter}, wall: {:.3}us",
+                    defects_reader.count,
+                    cpu_wall_diff * 1e6
+                );
+            }
+            cpu_wall_benchmarker.record(cpu_wall_diff);
+
+            streaming_node_offset += defects.len();
+        } else {
+            // Batch mode: load all defects, fuse layers one by one, full reset between samples
+            for (node_index, &vertex_index) in defects.iter().enumerate() {
+                dual_module.add_defect(ni!(vertex_index), ni!(node_index));
+            }
+            let mut layer_id = 0;
+            if !USE_LAYER_FUSION {
+                // load all layers except for 1
+                for layer_id in 0..NUM_LAYER_FUSION - 1 {
                     unsafe {
                         extern_c::execute_instruction(
                             Instruction32::load_syndrome_external(ni!(layer_id)).into(),
                             context_id,
                         )
                     };
-                    layer_id += 1;
+                }
+                layer_id = NUM_LAYER_FUSION - 1;
+            };
+            // start timer and set up load stall emulator
+            let native_start = unsafe { extern_c::get_native_time() };
+            let fast_start = unsafe { extern_c::get_fast_cpu_time() };
+            let syndrome_start = native_start + syndrome_start_delay_cycle;
+            let syndrome_finish = syndrome_start + finish_delta;
+            unsafe { extern_c::setup_load_stall_emulator(syndrome_start, interval, context_id) };
+            // solve it
+            while layer_id < NUM_LAYER_FUSION {
+                unsafe {
+                    extern_c::execute_instruction(
+                        Instruction32::load_syndrome_external(ni!(layer_id)).into(),
+                        context_id,
+                    )
+                };
+                layer_id += 1;
+                if USE_LAYER_FUSION && MULTIPLE_FUSION {
+                    let duration_ns = unsafe { extern_c::get_fast_cpu_duration_ns(fast_start) };
+                    while duration_ns > syndrome_start_delay_ns + (layer_id as u64) * (MEASUREMENT_CYCLE_NS as u64)
+                        && layer_id < NUM_LAYER_FUSION
+                    {
+                        unsafe {
+                            extern_c::execute_instruction(
+                                Instruction32::load_syndrome_external(ni!(layer_id)).into(),
+                                context_id,
+                            )
+                        };
+                        layer_id += 1;
+                    }
+                }
+                // solve until no obstacle is found
+                let (mut obstacle, _) = dual_module.find_obstacle();
+                while !obstacle.is_none() {
+                    primal_module.resolve(dual_module, obstacle);
+                    (obstacle, _) = dual_module.find_obstacle();
                 }
             }
-            // solve until no obstacle is found
-            let (mut obstacle, _) = dual_module.find_obstacle();
-            while !obstacle.is_none() {
-                // println!("obstacle: {obstacle:?}");
-                primal_module.resolve(dual_module, obstacle);
-                (obstacle, _) = dual_module.find_obstacle();
-            }
-        }
-        let cpu_wall_diff = (unsafe { extern_c::get_fast_cpu_duration_ns(fast_start) } as f64) * 1e-9;
-        let counter = unsafe { extern_c::get_instruction_counter() };
-        // get time from hardware
-        let load_time = unsafe { extern_c::get_last_load_time(context_id) };
-        assert!(
-            load_time >= syndrome_finish,
-            "load stall emulator enforces that syndrome is not loaded before it's ready"
-        );
-        let finish_time = unsafe { extern_c::get_last_finish_time(context_id) };
-        let hardware_diff = unsafe { extern_c::diff_native_time(syndrome_finish, finish_time) } as f64;
-        if !DISABLE_DETAIL_PRINT {
-            println!(
-                "[{}] time: {:.3}us, counter: {counter}, wall: {:.3}us",
-                defects_reader.count,
-                hardware_diff * 1e6,
-                cpu_wall_diff * 1e6
+            let cpu_wall_diff = (unsafe { extern_c::get_fast_cpu_duration_ns(fast_start) } as f64) * 1e-9;
+            let counter = unsafe { extern_c::get_instruction_counter() };
+            let load_time = unsafe { extern_c::get_last_load_time(context_id) };
+            assert!(
+                load_time >= syndrome_finish,
+                "load stall emulator enforces that syndrome is not loaded before it's ready"
             );
+            let finish_time = unsafe { extern_c::get_last_finish_time(context_id) };
+            let hardware_diff = unsafe { extern_c::diff_native_time(syndrome_finish, finish_time) } as f64;
+            if !DISABLE_DETAIL_PRINT {
+                println!(
+                    "[{}] time: {:.3}us, counter: {counter}, wall: {:.3}us",
+                    defects_reader.count,
+                    hardware_diff * 1e6,
+                    cpu_wall_diff * 1e6
+                );
+            }
+            latency_benchmarker.record(hardware_diff);
+            cpu_wall_benchmarker.record(cpu_wall_diff);
+            primal_module.reset();
+            dual_module.reset();
         }
-        latency_benchmarker.record(hardware_diff);
-        cpu_wall_benchmarker.record(cpu_wall_diff);
-        primal_module.reset();
-        dual_module.reset();
         // early break if reaching the limit
         if MAX_ROUND != 0 {
             if defects_reader.count >= MAX_ROUND {
@@ -192,9 +246,10 @@ pub fn main() {
             }
         }
         // print something every 5s
-        if unsafe { extern_c::diff_native_time(last_native_time, native_start) } > 5. {
+        let native_now = unsafe { extern_c::get_native_time() };
+        if unsafe { extern_c::diff_native_time(last_native_time, native_now) } > 5. {
             println!("[info] have run {} samples", defects_reader.count);
-            last_native_time = native_start;
+            last_native_time = native_now;
             println!("latency_benchmarker statistics:");
             latency_benchmarker.print_statistics();
         }

@@ -12,6 +12,10 @@ pub trait DualStacklessDriver {
     fn set_blossom(&mut self, node: CompactNodeIndex, blossom: CompactNodeIndex);
     fn find_obstacle(&mut self) -> (CompactObstacle, CompactWeight);
     fn add_defect(&mut self, vertex: CompactVertexIndex, node: CompactNodeIndex);
+    /// load syndrome for a given layer, clearing isVirtual for that layer's vertices
+    fn fuse_layer(&mut self, _layer_id: CompactLayerNum) {}
+    /// archive the current elastic slice: shifts layer state down and resets top layer
+    fn archive_elastic_slice(&mut self) {}
     /// just to inform a blossom has been created; no need to do anything
     fn on_blossom_created(&mut self, _blossom: CompactNodeIndex) {}
     fn on_blossom_expanded(&mut self, _blossom: CompactNodeIndex) {}
@@ -73,6 +77,14 @@ impl<D: DualStacklessDriver> DualInterface for DualModuleStackless<D> {
 
     fn add_defect(&mut self, vertex: CompactVertexIndex, node: CompactNodeIndex) {
         self.driver.add_defect(vertex, node);
+    }
+
+    fn fuse_layer(&mut self, layer_id: CompactLayerNum) {
+        self.driver.fuse_layer(layer_id);
+    }
+
+    fn archive_elastic_slice(&mut self) {
+        self.driver.archive_elastic_slice();
     }
 }
 

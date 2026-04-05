@@ -116,6 +116,12 @@ impl<'a, D: DualModuleImpl> DualInterface for MockDualInterface<'a, D> {
     fn add_defect(&mut self, _vertex: CompactVertexIndex, _node: CompactNodeIndex) {
         unimplemented_or_loop!()
     }
+    fn fuse_layer(&mut self, _layer_id: CompactLayerNum) {
+        unimplemented_or_loop!()
+    }
+    fn archive_elastic_slice(&mut self) {
+        unimplemented_or_loop!()
+    }
 }
 
 impl PrimalModuleImpl for PrimalModuleEmbeddedAdaptor {

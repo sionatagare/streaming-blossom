@@ -73,6 +73,14 @@ impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualStacklessDr
     fn add_defect(&mut self, vertex: CompactVertexIndex, node: CompactNodeIndex) {
         self.driver.add_defect(vertex, node);
     }
+
+    fn fuse_layer(&mut self, layer_id: CompactLayerNum) {
+        self.driver.fuse_layer(layer_id);
+    }
+
+    fn archive_elastic_slice(&mut self) {
+        self.driver.archive_elastic_slice();
+    }
 }
 
 impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualDriverTracked<D, N> {

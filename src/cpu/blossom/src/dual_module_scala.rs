@@ -52,9 +52,6 @@ impl SolverTrackedDual for DualModuleScalaDriver {
     fn new_from_graph_config(graph: MicroBlossomSingle, config: serde_json::Value) -> Self {
         Self::new(graph, serde_json::from_value(config).unwrap()).unwrap()
     }
-    fn fuse_layer(&mut self, layer_id: usize) {
-        self.load_syndrome_external(ni!(layer_id));
-    }
     fn get_pre_matchings(&self, _belonging: DualModuleInterfaceWeak) -> PerfectMatching {
         // TODO: implement pre matching fetching
         PerfectMatching::default()
@@ -208,6 +205,12 @@ impl DualStacklessDriver for DualModuleScalaDriver {
     }
     fn add_defect(&mut self, vertex: CompactVertexIndex, node: CompactNodeIndex) {
         write!(self.link.lock().unwrap().writer, "add_defect({vertex}, {node})\n").unwrap();
+    }
+    fn fuse_layer(&mut self, layer_id: CompactLayerNum) {
+        self.load_syndrome_external(ni!(layer_id));
+    }
+    fn archive_elastic_slice(&mut self) {
+        write!(self.link.lock().unwrap().writer, "archive_elastic_slice()\n").unwrap();
     }
 }
 

@@ -93,12 +93,6 @@ impl SolverTrackedDual for DualModuleCombDriver {
             "conflicts": self.profiler_response_history,
         })
     }
-    fn fuse_layer(&mut self, layer_id: usize) {
-        self.execute_instruction(Instruction::LoadDefectsExternal {
-            time: layer_id,
-            channel: 0,
-        });
-    }
     fn get_pre_matchings(&self, belonging: DualModuleInterfaceWeak) -> PerfectMatching {
         let edges = self.pre_matching_edges();
         let mut perfect_matching = PerfectMatching::default();
@@ -360,6 +354,15 @@ impl DualStacklessDriver for DualModuleCombDriver {
             node: node.get() as NodeIndex,
         });
     }
+    fn fuse_layer(&mut self, layer_id: CompactLayerNum) {
+        self.execute_instruction(Instruction::LoadDefectsExternal {
+            time: layer_id as usize,
+            channel: 0,
+        });
+    }
+    fn archive_elastic_slice(&mut self) {
+        self.execute_instruction(Instruction::ArchiveElasticSlice);
+    }
 }
 
 impl DualTrackedDriver for DualModuleCombDriver {
@@ -472,6 +475,7 @@ pub enum Instruction {
     FindObstacle,
     Grow { length: Weight },
     LoadDefectsExternal { time: usize, channel: usize },
+    ArchiveElasticSlice,
 }
 
 pub const VIRTUAL_NODE_INDEX: NodeIndex = NodeIndex::MAX;

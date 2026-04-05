@@ -127,6 +127,12 @@ pub trait DualInterface {
 
     /// add a defect at given vertex
     fn add_defect(&mut self, vertex: CompactVertexIndex, node: CompactNodeIndex);
+
+    /// load syndrome for a given layer, clearing isVirtual for that layer's vertices
+    fn fuse_layer(&mut self, layer_id: CompactLayerNum);
+
+    /// archive the current elastic slice: shifts layer state down and resets top layer
+    fn archive_elastic_slice(&mut self);
 }
 
 impl CompactObstacle {
