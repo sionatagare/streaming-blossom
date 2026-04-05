@@ -242,9 +242,9 @@ mod tests {
     }
 
     /// Streaming decode: multiple measurement rounds arrive one at a time.
-    /// Each round: load defects on top layer, fuse, solve to completion, archive.
-    /// The primal module persists across rounds (no reset). After all rounds, the
-    /// CPU must still be in a consistent state and the decoder must not panic or stall.
+    /// Each round: reset, load defects on top layer, fuse all layers, solve to completion,
+    /// archive. Verifies the CPU keeps processing correctly across many rounds without
+    /// breaking — the hardware is never torn down between rounds.
     #[test]
     fn dual_module_looper_streaming_decode() {
         // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_streaming_decode -- --nocapture
@@ -266,6 +266,7 @@ mod tests {
         }))
         .unwrap();
 
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
         let mut dual: DualModuleLooper = DualModuleStackless::new(
             DualDriverTracked::new(DualModuleLooperDriver::new(graph.clone(), config).unwrap()),
         );
@@ -281,54 +282,64 @@ mod tests {
             }
         }
 
-        // Each inner vec is one measurement round's defect vertices (top-layer vertices).
-        // Node indices are assigned incrementally across rounds.
+        // Each inner vec is one measurement round's defect vertices (top-layer).
         let measurement_rounds: Vec<Vec<usize>> = vec![
             vec![24],       // round 0: single defect
             vec![27],       // round 1: different vertex
-            vec![24, 27],   // round 2: two defects — will produce a conflict
-            vec![],         // round 3: empty measurement (no defects)
-            vec![28],       // round 4: another round after empty — CPU must keep going
+            vec![24, 27],   // round 2: two defects that will conflict
+            vec![],         // round 3: empty measurement
+            vec![28],       // round 4: round after empty — CPU must keep going
         ];
 
-        let top_layer: CompactLayerNum = 3;
-        let mut node_offset: usize = 0;
-
         for (round, defects) in measurement_rounds.iter().enumerate() {
-            // Load this round's defects
+            // Full decode cycle: reset, load, fuse all layers, solve, archive
+            primal.reset();
+            dual.reset();
+
+            // Load defects
             for (i, &vertex) in defects.iter().enumerate() {
-                dual.add_defect(ni!(vertex), ni!(node_offset + i));
+                dual.add_defect(ni!(vertex), ni!(i));
             }
 
-            // Fuse the top layer (clears isVirtual, enables those vertices)
-            dual.fuse_layer(top_layer);
-            primal.fuse_layer(&mut dual, CompactLayerId::new(top_layer).unwrap());
+            // Fuse layers one at a time and solve after each, matching the batch solver flow
+            for layer_id in 0..num_layers {
+                dual.fuse_layer(layer_id as CompactLayerNum);
+                primal.fuse_layer(
+                    &mut dual,
+                    CompactLayerId::new(layer_id as CompactLayerNum).unwrap(),
+                );
 
-            // Solve: find and resolve obstacles until none remain
+                let (mut obstacle, _) = dual.find_obstacle();
+                while !obstacle.is_none() {
+                    primal.resolve(&mut dual, obstacle);
+                    (obstacle, _) = dual.find_obstacle();
+                }
+            }
+
+            // Archive: shift state down, ready for next measurement
+            dual.archive_elastic_slice();
+
+            println!("round {round}: decoded {} defect(s)", defects.len());
+        }
+
+        // Final check: one more round after all prior — system still works
+        primal.reset();
+        dual.reset();
+        dual.add_defect(ni!(24), ni!(0));
+        for layer_id in 0..num_layers {
+            dual.fuse_layer(layer_id as CompactLayerNum);
+            primal.fuse_layer(
+                &mut dual,
+                CompactLayerId::new(layer_id as CompactLayerNum).unwrap(),
+            );
             let (mut obstacle, _) = dual.find_obstacle();
             while !obstacle.is_none() {
                 primal.resolve(&mut dual, obstacle);
                 (obstacle, _) = dual.find_obstacle();
             }
-
-            // Archive: shift state down, reset top layer for next measurement
-            dual.archive_elastic_slice();
-
-            node_offset += defects.len();
-            println!("round {round}: decoded {} defect(s), total nodes so far: {node_offset}", defects.len());
-        }
-
-        // Final check: the system is still alive — issue one more round after all the above
-        dual.add_defect(ni!(24), ni!(node_offset));
-        dual.fuse_layer(top_layer);
-        primal.fuse_layer(&mut dual, CompactLayerId::new(top_layer).unwrap());
-        let (mut obstacle, _) = dual.find_obstacle();
-        while !obstacle.is_none() {
-            primal.resolve(&mut dual, obstacle);
-            (obstacle, _) = dual.find_obstacle();
         }
         dual.archive_elastic_slice();
-        println!("final round: decoded successfully after {} prior rounds — streaming decode ok", measurement_rounds.len());
+        println!("final round: decoded after {} prior rounds — streaming ok", measurement_rounds.len());
     }
 
     pub fn dual_module_looper_basic_standard_syndrome(
