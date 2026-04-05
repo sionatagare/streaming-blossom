@@ -12,6 +12,7 @@ use micro_blossom_nostd::instruction::*;
 use micro_blossom_nostd::interface::*;
 use micro_blossom_nostd::latency_benchmarker::*;
 use micro_blossom_nostd::primal_module_embedded::*;
+#[allow(unused_imports)]
 use micro_blossom_nostd::util::*;
 #[allow(unused_imports)]
 use num_traits::float::FloatCore;
@@ -151,8 +152,10 @@ pub fn main() {
             // Archive: shifts layer state down, resets top layer for next measurement
             dual_module.archive_elastic_slice();
 
+            let num_defects = defects.len();
             let cpu_wall_diff = (unsafe { extern_c::get_fast_cpu_duration_ns(fast_start) } as f64) * 1e-9;
             let counter = unsafe { extern_c::get_instruction_counter() };
+            drop(defects);
             if !DISABLE_DETAIL_PRINT {
                 println!(
                     "[{}] counter: {counter}, wall: {:.3}us",
@@ -162,7 +165,7 @@ pub fn main() {
             }
             cpu_wall_benchmarker.record(cpu_wall_diff);
 
-            streaming_node_offset += defects.len();
+            streaming_node_offset += num_defects;
         } else {
             // Batch mode: load all defects, fuse layers one by one, full reset between samples
             for (node_index, &vertex_index) in defects.iter().enumerate() {
