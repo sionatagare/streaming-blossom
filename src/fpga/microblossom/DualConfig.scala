@@ -28,7 +28,9 @@ case class DualConfig(
     var graph: SingleGraph = null,
     val filename: String = null,
     val minimizeBits: Boolean = true,
-    var injectRegisters: Seq[String] = List()
+    var injectRegisters: Seq[String] = List(),
+    /** Depth of the elastic `layers` BRAM per vertex. Sized to the problem; never wraps. */
+    var archiveDepth: Int = 1
 ) {
   assert(isPow2(instructionBufferDepth) & instructionBufferDepth >= 2)
   if (supportLoadStallEmulator) {
@@ -59,6 +61,10 @@ case class DualConfig(
     }
   }
   def numLayers = layerFusion.num_layers
+  /** First time-slice (`layers(0)`) vertices own elastic `layers` BRAM (see `Vertex.elastic`). */
+  def vertexHasElasticLayers(vertexIndex: Int): Boolean =
+    numLayers > 0 && layerFusion.layers.nonEmpty &&
+      layerFusion.layers(0).exists(_.toInt == vertexIndex)
   def layerIdBits = log2Up(numLayers)
   def parityReporters = {
     graph.parity_reporters match {
@@ -80,6 +86,8 @@ case class DualConfig(
   /// When mode==1, donor vertex index (strictly higher layer).
   /// look up table for whether to copy from donor, reset, or do nothing (0)
   private var archiveElasticLayerShiftDonor: Array[Int] = Array.empty[Int]
+  /// For each vertex, the layer-0 vertex whose donor chain reaches it (inverse of shift donor).
+  private var layer0Counterpart_ : Array[Int] = Array.empty[Int]
 
   def archiveElasticLayerShiftModeOf(vertexIndex: Int): Int = {
     if (archiveElasticLayerShiftMode.isEmpty) 0
@@ -89,6 +97,25 @@ case class DualConfig(
     if (archiveElasticLayerShiftDonor.isEmpty) 0
     else archiveElasticLayerShiftDonor(vertexIndex)
   }
+  def archiveAddressBits: Int = log2Up(archiveDepth) max 1
+  /** Layer-0 vertex whose donor chain reaches `vertexIndex`. Identity for layer-0 vertices. */
+  def layer0CounterpartOf(vertexIndex: Int): Int = {
+    if (layer0Counterpart_.isEmpty) vertexIndex
+    else layer0Counterpart_(vertexIndex)
+  }
+  /** Layer of an edge, derived from its endpoints' vertexLayerId. Fusion edge → lower layer. None for non-layer edges. */
+  def edgeLayerOf(edgeIndex: Int): Option[Int] = {
+    val (l, r) = incidentVerticesOf(edgeIndex)
+    (vertexLayerId.get(l), vertexLayerId.get(r)) match {
+      case (Some(ll), Some(lr)) => Some(ll min lr)
+      case (Some(ll), None)     => Some(ll)
+      case (None, Some(lr))     => Some(lr)
+      case (None, None)         => None
+    }
+  }
+  /** BRAM indices that an edge at layer `edgeLayer` should check: L, L+numLayers, L+2*numLayers, ... */
+  def archiveScanAddressesOf(edgeLayer: Int): Seq[Int] =
+    (edgeLayer until archiveDepth by numLayers.toInt)
 
   if (filename != null) {
     val source = scala.io.Source.fromFile(filename)
@@ -136,10 +163,13 @@ case class DualConfig(
     updateArchiveElasticLayerShiftTable()
   }
 
-  /** Build donor map: each vertex in layer L copies from same index in layer L+1; top layer resets. */
+  /** Build donor map: each vertex in layer L copies from same index in layer L+1; top layer resets.
+    * Also builds the inverse `layer0Counterpart_` map.
+    */
   def updateArchiveElasticLayerShiftTable(): Unit = {
     archiveElasticLayerShiftMode = Array.fill(vertexNum)(0)
     archiveElasticLayerShiftDonor = Array.fill(vertexNum)(0)
+    layer0Counterpart_ = Array.tabulate(vertexNum)(identity) // default: self
     if (supportLayerFusion && numLayers >= 2) {
       val lf = layerFusion
       val nl = numLayers.toInt
@@ -150,7 +180,6 @@ case class DualConfig(
           below.length == above.length,
           s"layer fusion: layers($L) and layers(${L + 1}) must have equal length for archive+layer-shift"
         )
-        // ensure middle vertices are all enabeled to shift
         for (i <- below.indices) {
           archiveElasticLayerShiftMode(below(i)) = 1
           archiveElasticLayerShiftDonor(below(i)) = above(i)
@@ -159,6 +188,18 @@ case class DualConfig(
       // ensure last layer is set to reset not shift
       for (v <- lf.layers(nl - 1)) {
         archiveElasticLayerShiftMode(v.toInt) = 2
+      }
+      // build layer-0 counterpart map: for each vertex in layer L>0,
+      // follow the donor chain backward to find its layer-0 counterpart
+      val layer0 = lf.layers(0).map(_.toInt)
+      for (i <- layer0.indices) {
+        // layer0(i) is the base; its donor chain goes layer0(i) ← layer1(i) ← layer2(i) ← ...
+        var v = layer0(i)
+        layer0Counterpart_(v) = layer0(i)
+        for (L <- 1 until nl) {
+          v = lf.layers(L)(i).toInt
+          layer0Counterpart_(v) = layer0(i)
+        }
       }
     }
   }
@@ -333,6 +374,7 @@ case class DualConfig(
     assert(weightBits <= 30)
     assert(weightBits > 0)
     assert(contextDepth > 0)
+    assert(archiveDepth >= 1)
     instructionSpec.sanityCheck()
   }
 }

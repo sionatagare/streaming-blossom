@@ -11,37 +11,44 @@ import spinal.lib._
 
 case class StageOffloadVertex(config: DualConfig, vertexIndex: Int) extends Bundle {
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val message = BroadcastMessage(config)
 }
 
 case class StageOffloadVertex2(config: DualConfig, vertexIndex: Int) extends Bundle {
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val message = BroadcastMessage(config)
 
   def connect(last: StageOffloadVertex) = {
     state := last.state
+    archivedState := last.archivedState
     message := last.message
   }
 }
 
 case class StageOffloadVertex3(config: DualConfig, vertexIndex: Int) extends Bundle {
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val message = BroadcastMessage(config)
   val isUniqueTight = Bool // |incident tight edges| = 1
   val isIsolated = Bool // |incident tight edges| = 0
 
   def connect(last: StageOffloadVertex2) = {
     state := last.state
+    archivedState := last.archivedState
     message := last.message
   }
 }
 
 case class StageOffloadVertex4(config: DualConfig, vertexIndex: Int) extends Bundle {
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val message = BroadcastMessage(config)
 
   def connect(last: StageOffloadVertex3) = {
     state := last.state
+    archivedState := last.archivedState
     message := last.message
   }
 }
@@ -77,6 +84,9 @@ case class StageOffloadEdge2(config: DualConfig) extends Bundle {
   val state = EdgeState(config.weightBits)
   val isTight = Bool
   val isTightExFusion = Bool // if the conditioned vertex is virtual, then this edge is not consider tight when counting
+  /// Same as `isTight` / `isTightExFusion` but endpoint `grown` comes from elastic `layers` when that vertex has elastic storage.
+  val isTightVsElasticLayers = Bool
+  val isTightExFusionVsElasticLayers = Bool
   val compact = BroadcastCompact(config)
 
   def connect(last: StageOffloadEdge) = {
@@ -92,7 +102,6 @@ case class StageOffloadEdge3(config: DualConfig) extends Bundle {
 
   def connect(last: StageOffloadEdge2) = {
     state := last.state
-    isTight := last.isTight
     compact := last.compact
   }
 }

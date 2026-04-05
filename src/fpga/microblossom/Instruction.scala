@@ -98,6 +98,18 @@ case class Instruction(config: DualConfig = DualConfig()) extends Bits {
 
   def isChangingSyndrome(): Bool = isAddDefect || isReset || isLoadDefectsExternal
 
+  /** Dual writes that must drain through elastic `layers` vertices before the next instruction (not read-only). */
+  def affectsElasticArchivedDualState(): Bool = {
+    val base = isSetSpeed() || isSetBlossom() || isMatch() || isAddDefect()
+    val extAffects = isExtended && (
+      isGrow || isReset() || isLoadDefectsExternal() || isArchiveElasticSlice() ||
+        (extendedOpCode === ExtendedOpCode.ClearAccumulator) ||
+        (extendedOpCode === ExtendedOpCode.AccumulateEdge) ||
+        (extendedOpCode === ExtendedOpCode.LoadWeightsExternal)
+    )
+    base || extAffects
+  }
+
   def assignExtendedOpCode(code: Int) = {
     opCode := OpCode.SetSpeed
     extensionIndicator := True.asBits

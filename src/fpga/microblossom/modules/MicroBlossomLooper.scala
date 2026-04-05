@@ -53,7 +53,8 @@ case class MicroBlossomLooper[T <: Data](config: DualConfig, tagType: HardType[T
 
   // immediate feedback happens when the response allows immediate growth
   // when maximumGrowth is 0, the loopback is forbidden
-  immediateLoopback := responseEntry.valid && (
+  val elasticArchiveBusy = microBlossom.io.elasticArchivePipelineBusy
+  immediateLoopback := !elasticArchiveBusy && responseEntry.valid && (
     responseEntry.isLoopBackGrow || (
       !microBlossom.io.conflict.valid &&
         (microBlossom.io.maxGrowable.length =/= microBlossom.io.maxGrowable.length.maxValue) &&
@@ -91,15 +92,17 @@ case class MicroBlossomLooper[T <: Data](config: DualConfig, tagType: HardType[T
     inputInstruction := io.push.payload.instruction
   }
 
-  // pass the inputEntry to the MicroBlossom module
-  microBlossom.io.message.valid := inputEntry.valid
+  // pass the inputEntry to the MicroBlossom module (held during elastic archive stall)
+  microBlossom.io.message.valid := inputEntry.valid && !elasticArchiveBusy
   microBlossom.io.message.instruction := inputInstruction
   if (config.contextBits > 0) { microBlossom.io.message.contextId := inputEntry.contextId }
 
   // shift pipeline entries
-  for (i <- (0 until pipelineLength).reverse) {
-    pipelineEntries(i) := (if (i == 0) { inputEntry }
-                           else { pipelineEntries(i - 1) })
+  when(!elasticArchiveBusy) {
+    for (i <- (0 until pipelineLength).reverse) {
+      pipelineEntries(i) := (if (i == 0) { inputEntry }
+                             else { pipelineEntries(i - 1) })
+    }
   }
 
   // detect data races: forbid an instruction to enter until the pipeline does not have any entry of the same context ID
@@ -132,7 +135,7 @@ case class MicroBlossomLooper[T <: Data](config: DualConfig, tagType: HardType[T
   }
 
   // take the data from input only if it's valid, no data race, and not inserting immediate loopback
-  io.push.ready := io.push.valid && !isDataRace && !immediateLoopback
+  io.push.ready := io.push.valid && !isDataRace && !immediateLoopback && !elasticArchiveBusy
 
   def simExecute(input: LooperInputData): LooperOutputData = {
     io.push.valid #= true

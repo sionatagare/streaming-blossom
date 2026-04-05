@@ -12,12 +12,15 @@ import spinal.lib._
 
 case class StageUpdateVertex(config: DualConfig, vertexIndex: Int) extends Bundle {
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val isStalled = Bool
   val compact = BroadcastCompact(config)
   val propagatingPeer = VertexPropagatingPeerResult(config.vertexBits)
+  val archivedPropagatingPeer = VertexPropagatingPeerResult(config.vertexBits)
 
   def connect(last: StageExecuteVertex3) = {
     state := last.state
+    archivedState := last.archivedState
     isStalled := last.isStalled
     compact := last.compact
   }
@@ -25,24 +28,30 @@ case class StageUpdateVertex(config: DualConfig, vertexIndex: Int) extends Bundl
 
 case class StageUpdateVertex2(config: DualConfig, vertexIndex: Int) extends Bundle {
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val isStalled = Bool
   val compact = BroadcastCompact(config)
   val propagatingPeer = VertexPropagatingPeerResult(config.vertexBits)
+  val archivedPropagatingPeer = VertexPropagatingPeerResult(config.vertexBits)
 
   def connect(last: StageUpdateVertex) = {
     compact := last.compact
     isStalled := last.isStalled
     propagatingPeer := last.propagatingPeer
+    archivedPropagatingPeer := last.archivedPropagatingPeer
   }
 }
 
 case class StageUpdateVertex3(config: DualConfig, vertexIndex: Int) extends Bundle {
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val shadow = VertexShadowResult(config.vertexBits)
+  val archivedShadow = VertexShadowResult(config.vertexBits)
   val compact = BroadcastCompact(config)
 
   def connect(last: StageUpdateVertex2) = {
     state := last.state
+    archivedState := last.archivedState
     compact := last.compact
   }
 }
@@ -77,6 +86,7 @@ case class StageUpdateOffloader3(config: DualConfig, offloaderIndex: Int) extend
 case class StageUpdateEdge(config: DualConfig) extends Bundle {
   val state = EdgeState(config.weightBits)
   val remaining = UInt(config.weightBits bits)
+  val remainingVsElasticLayers = UInt(config.weightBits bits)
   val compact = BroadcastCompact(config)
 
   def connect(last: StageExecuteEdge3) = {
@@ -88,11 +98,13 @@ case class StageUpdateEdge(config: DualConfig) extends Bundle {
 case class StageUpdateEdge2(config: DualConfig) extends Bundle {
   val state = EdgeState(config.weightBits)
   val remaining = UInt(config.weightBits bits)
+  val remainingVsElasticLayers = UInt(config.weightBits bits)
   val compact = BroadcastCompact(config)
 
   def connect(last: StageUpdateEdge) = {
     state := last.state
     remaining := last.remaining
+    remainingVsElasticLayers := last.remainingVsElasticLayers
     compact := last.compact
   }
 }
@@ -100,11 +112,13 @@ case class StageUpdateEdge2(config: DualConfig) extends Bundle {
 case class StageUpdateEdge3(config: DualConfig) extends Bundle {
   val state = EdgeState(config.weightBits)
   val remaining = UInt(config.weightBits bits)
+  val remainingVsElasticLayers = UInt(config.weightBits bits)
   val compact = BroadcastCompact(config)
 
   def connect(last: StageUpdateEdge2) = {
     state := last.state
     remaining := last.remaining
+    remainingVsElasticLayers := last.remainingVsElasticLayers
     compact := last.compact
   }
 }
