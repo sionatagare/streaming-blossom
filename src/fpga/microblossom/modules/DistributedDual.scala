@@ -1138,6 +1138,11 @@ class DistributedDualTest extends AnyFunSuite {
       }
   }
 
+}
+
+// sbt 'testOnly microblossom.modules.MultiLayerArchiveTest'
+class MultiLayerArchiveTest extends AnyFunSuite {
+
   // ========================================================================
   // Multi-layer archive tests
   // ========================================================================

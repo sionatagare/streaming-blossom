@@ -100,7 +100,7 @@ case class Instruction(config: DualConfig = DualConfig()) extends Bits {
 
   /** Dual writes that must drain through elastic `layers` vertices before the next instruction (not read-only). */
   def affectsElasticArchivedDualState(): Bool = {
-    val base = isSetSpeed() || isSetBlossom() || isMatch() || isAddDefect()
+    val base = isSetSpeed() || isSetBlossom() || (opCode === OpCode.Match) || isAddDefect()
     val extAffects = isExtended && (
       isGrow || isReset() || isLoadDefectsExternal() || isArchiveElasticSlice() ||
         (extendedOpCode === ExtendedOpCode.ClearAccumulator) ||
