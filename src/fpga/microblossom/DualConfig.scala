@@ -97,7 +97,7 @@ case class DualConfig(
     if (archiveElasticLayerShiftDonor.isEmpty) 0
     else archiveElasticLayerShiftDonor(vertexIndex)
   }
-  def archiveAddressBits: Int = log2Up(archiveDepth) max 1
+  def archiveAddressBits: Int = log2Up(archiveDepth max 2)
   /** Layer-0 vertex whose donor chain reaches `vertexIndex`. Identity for layer-0 vertices. */
   def layer0CounterpartOf(vertexIndex: Int): Int = {
     if (layer0Counterpart_.isEmpty) vertexIndex

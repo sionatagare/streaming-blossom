@@ -118,12 +118,13 @@ case class Vertex(
     layers.setTechnology(ramBlock)
   }
 
-  // Register file holding all archived vertex states (loaded from BRAM during mirror walk).
+  // Register file holding all archived vertex states. Padded to at least 2 for address bit alignment.
+  val archivedRegsDepth = config.archiveDepth max 2
   val archivedRegs =
-    if (elastic) Vec.fill(config.archiveDepth)(Reg(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))))
+    if (elastic) Vec.fill(archivedRegsDepth)(Reg(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))))
     else null
   if (elastic) {
-    for (i <- 0 until config.archiveDepth) {
+    for (i <- 0 until archivedRegsDepth) {
       archivedRegs(i).init(VertexState.resetValue(config, vertexIndex))
     }
   }
