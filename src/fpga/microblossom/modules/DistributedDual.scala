@@ -875,26 +875,27 @@ class DistributedDualTest extends AnyFunSuite {
         simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 1)
 
         // After fetching context 1: v24 should still have node=1, grown=2 (context 1 untouched)
-        assert(dut.vertices(24).register.node.toLong == 1, "ctx1 v24 node should be 1 (untouched)")
-        assert(dut.vertices(24).register.grown.toLong == 2, "ctx1 v24 grown should be 2 (untouched)")
+        // In multi-context mode, read from pipeline output (stageOutputs) instead of register
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.node.toLong == 1, "ctx1 v24 node should be 1 (untouched)")
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.grown.toLong == 2, "ctx1 v24 grown should be 2 (untouched)")
 
         // Now fetch context 0 to verify the shift happened
         simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 0)
 
         // Context 0: v24 should be reset (mode 2)
-        assert(dut.vertices(24).register.node.toLong == config.IndexNone, "ctx0 v24 should be reset after archive")
-        assert(dut.vertices(24).register.grown.toLong == 0, "ctx0 v24 grown should be 0 after archive")
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.node.toLong == config.IndexNone, "ctx0 v24 should be reset after archive")
+        assert(dut.vertices(24).io.stageOutputs.updateGet3.state.grown.toLong == 0, "ctx0 v24 grown should be 0 after archive")
         // Context 0: v16 should hold v24's old ctx0 state (node=0, grown=1)
-        assert(dut.vertices(16).register.node.toLong == 0, "ctx0 v16 should have v24's old node=0")
-        assert(dut.vertices(16).register.grown.toLong == 1, "ctx0 v16 should have v24's old grown=1")
+        assert(dut.vertices(16).io.stageOutputs.updateGet3.state.node.toLong == 0, "ctx0 v16 should have v24's old node=0")
+        assert(dut.vertices(16).io.stageOutputs.updateGet3.state.grown.toLong == 1, "ctx0 v16 should have v24's old grown=1")
 
         // Now archive context 1
         simExecuteCtx(ioConfig.instructionSpec.generateArchiveElasticSlice(), 1)
         simExecuteCtx(ioConfig.instructionSpec.generateFindObstacle(), 1)
 
         // Context 1: v16 should hold v24's old ctx1 state (node=1, grown=2)
-        assert(dut.vertices(16).register.node.toLong == 1, "ctx1 v16 should have v24's old node=1")
-        assert(dut.vertices(16).register.grown.toLong == 2, "ctx1 v16 should have v24's old grown=2")
+        assert(dut.vertices(16).io.stageOutputs.updateGet3.state.node.toLong == 1, "ctx1 v16 should have v24's old node=1")
+        assert(dut.vertices(16).io.stageOutputs.updateGet3.state.grown.toLong == 2, "ctx1 v16 should have v24's old grown=2")
 
         println("Context switching shift test passed")
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
