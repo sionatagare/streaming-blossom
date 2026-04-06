@@ -44,6 +44,9 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   val leftGrownBits = config.grownBitsOf(leftVertex)
   val rightGrownBits = config.grownBitsOf(rightVertex)
 
+  val leftL0Vertex = config.layer0CounterpartOf(leftVertex)
+  val rightL0Vertex = config.layer0CounterpartOf(rightVertex)
+
   val io = new Bundle {
     val message = in(BroadcastMessage(config))
     // interaction I/O
@@ -51,11 +54,10 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
     val leftVertexInput = in(Vertex.getStages(config, leftVertex).getStageOutput)
     val rightVertexInput = in(Vertex.getStages(config, rightVertex).getStageOutput)
     // Layer-0 counterpart vertex stage outputs (for archived state at pipeline stages)
-    val leftL0Vertex = config.layer0CounterpartOf(leftVertex)
-    val rightL0Vertex = config.layer0CounterpartOf(rightVertex)
     val leftL0VertexInput = in(Vertex.getStages(config, leftL0Vertex).getStageOutput)
     val rightL0VertexInput = in(Vertex.getStages(config, rightL0Vertex).getStageOutput)
     val edgeScanActive = in(Bool())
+    val edgeScanFeeding = in(Bool())  // true only during feeding phase, not drain
     val edgeScanIndex = in UInt (config.archiveAddressBits bits)
     // final outputs
     val maxGrowable = out(ConvergecastMaxGrowable(config.weightBits))
@@ -122,7 +124,22 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
     }
   }
 
-  // Archived state comes from layer-0 counterpart vertex's archivedState in pipeline stages
+  // Archived state comes from layer-0 counterpart vertex's archivedState in pipeline stages.
+  // For fusion edges with same L0 counterpart: the "upper" endpoint reads the current archivedState,
+  // the "lower" endpoint reads a 1-cycle delayed capture (from the previous scan tick).
+  // Accumulation triggers at scanIndex+1 instead of scanIndex.
+  val isFusionSameL0 = config.isFusionEdgeSameL0(edgeIndex)
+  val leftIsUpper = isFusionSameL0 && (leftVertex == config.fusionEdgeUpperVertex(edgeIndex))
+  val rightIsUpper = isFusionSameL0 && (rightVertex == config.fusionEdgeUpperVertex(edgeIndex))
+
+  // For fusion edges: capture previous tick's archivedState from L0 counterpart (1-cycle delay).
+  // The lower endpoint uses this captured value; the upper uses the current archivedState.
+  def archivedGrownAt(l0Elastic: Boolean, l0Input: => VertexState, liveInput: => UInt, isUpper: Boolean): UInt = {
+    if (!l0Elastic) liveInput
+    else if (!isFusionSameL0 || isUpper) l0Input.grown  // horizontal or upper endpoint: current
+    else RegNext(l0Input.grown)                          // lower endpoint of fusion: captured from previous tick
+  }
+
   val conditionedVertexIsVirtualArch = if (hasLayerFusion) {
     val conditionedVertex = config.edgeConditionedVertex(edgeIndex)
     val condL0 = config.layer0CounterpartOf(conditionedVertex)
@@ -130,18 +147,25 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
       if (conditionedVertex == leftVertex) io.leftL0VertexInput.offloadGet.archivedState.isVirtual
       else io.rightL0VertexInput.offloadGet.archivedState.isVirtual
     } else {
-      io.leftVertexInput.offloadGet.state.isVirtual // fallback for non-elastic
+      if (conditionedVertex == leftVertex) io.leftVertexInput.offloadGet.state.isVirtual
+      else io.rightVertexInput.offloadGet.state.isVirtual
     }
   } else {
     False
   }
 
-  val leftGrownOffloadLayers =
-    if (config.vertexHasElasticLayers(io.leftL0Vertex)) io.leftL0VertexInput.offloadGet.archivedState.grown
-    else io.leftVertexInput.offloadGet.state.grown
-  val rightGrownOffloadLayers =
-    if (config.vertexHasElasticLayers(io.rightL0Vertex)) io.rightL0VertexInput.offloadGet.archivedState.grown
-    else io.rightVertexInput.offloadGet.state.grown
+  val leftGrownOffloadLayers = archivedGrownAt(
+    config.vertexHasElasticLayers(leftL0Vertex),
+    io.leftL0VertexInput.offloadGet.archivedState,
+    io.leftVertexInput.offloadGet.state.grown,
+    leftIsUpper
+  )
+  val rightGrownOffloadLayers = archivedGrownAt(
+    config.vertexHasElasticLayers(rightL0Vertex),
+    io.rightL0VertexInput.offloadGet.archivedState,
+    io.rightVertexInput.offloadGet.state.grown,
+    rightIsUpper
+  )
 
   val offload2WeightArch = UInt(config.weightBits bits)
   offload2WeightArch := stages.offloadGet.state.weight
@@ -205,18 +229,25 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
       if (conditionedVertex == leftVertex) io.leftL0VertexInput.executeGet2.archivedState.isVirtual
       else io.rightL0VertexInput.executeGet2.archivedState.isVirtual
     } else {
-      io.leftVertexInput.executeGet2.state.isVirtual
+      if (conditionedVertex == leftVertex) io.leftVertexInput.executeGet2.state.isVirtual
+      else io.rightVertexInput.executeGet2.state.isVirtual
     }
   } else {
     False
   }
 
-  val leftGrownExecuteLayers =
-    if (config.vertexHasElasticLayers(io.leftL0Vertex)) io.leftL0VertexInput.executeGet2.archivedState.grown
-    else io.leftVertexInput.executeGet2.state.grown
-  val rightGrownExecuteLayers =
-    if (config.vertexHasElasticLayers(io.rightL0Vertex)) io.rightL0VertexInput.executeGet2.archivedState.grown
-    else io.rightVertexInput.executeGet2.state.grown
+  val leftGrownExecuteLayers = archivedGrownAt(
+    config.vertexHasElasticLayers(leftL0Vertex),
+    io.leftL0VertexInput.executeGet2.archivedState,
+    io.leftVertexInput.executeGet2.state.grown,
+    leftIsUpper
+  )
+  val rightGrownExecuteLayers = archivedGrownAt(
+    config.vertexHasElasticLayers(rightL0Vertex),
+    io.rightL0VertexInput.executeGet2.archivedState,
+    io.rightVertexInput.executeGet2.state.grown,
+    rightIsUpper
+  )
 
   val executeWeightArch = UInt(config.weightBits bits)
   executeWeightArch := stages.executeGet2.state.weight
@@ -250,12 +281,18 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
 
   stages.updateSet.connect(stages.executeGet3)
 
-  val leftGrownUpdateLayers =
-    if (config.vertexHasElasticLayers(io.leftL0Vertex)) io.leftL0VertexInput.executeGet3.archivedState.grown
-    else io.leftVertexInput.executeGet3.state.grown
-  val rightGrownUpdateLayers =
-    if (config.vertexHasElasticLayers(io.rightL0Vertex)) io.rightL0VertexInput.executeGet3.archivedState.grown
-    else io.rightVertexInput.executeGet3.state.grown
+  val leftGrownUpdateLayers = archivedGrownAt(
+    config.vertexHasElasticLayers(leftL0Vertex),
+    io.leftL0VertexInput.executeGet3.archivedState,
+    io.leftVertexInput.executeGet3.state.grown,
+    leftIsUpper
+  )
+  val rightGrownUpdateLayers = archivedGrownAt(
+    config.vertexHasElasticLayers(rightL0Vertex),
+    io.rightL0VertexInput.executeGet3.archivedState,
+    io.rightVertexInput.executeGet3.state.grown,
+    rightIsUpper
+  )
 
   val updateArea = new Area {
     val edgeRemaining = EdgeRemaining(
@@ -293,25 +330,44 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   edgeResponse.io.rightVertex := rightVertex
   edgeResponse.io.remaining := stages.updateGet3.remaining
 
-  // Archived edge response (from layer-0 counterpart vertex's archived pipeline)
+  // Archived edge response (from layer-0 counterpart vertex's archived pipeline).
+  // For fusion edges with same L0: lower endpoint uses captured (previous tick) shadow, upper uses current.
   val archivedEdgeResponse = EdgeResponse(config.vertexBits, config.weightBits)
-  val leftL0Elastic = config.vertexHasElasticLayers(io.leftL0Vertex)
-  val rightL0Elastic = config.vertexHasElasticLayers(io.rightL0Vertex)
-  archivedEdgeResponse.io.leftShadow := (if (leftL0Elastic) io.leftL0VertexInput.updateGet3.archivedShadow
-    else io.leftVertexInput.updateGet3.shadow)
-  archivedEdgeResponse.io.rightShadow := (if (rightL0Elastic) io.rightL0VertexInput.updateGet3.archivedShadow
-    else io.rightVertexInput.updateGet3.shadow)
-  archivedEdgeResponse.io.leftIsVirtual := (if (leftL0Elastic) io.leftL0VertexInput.updateGet3.archivedState.isVirtual
-    else io.leftVertexInput.updateGet3.state.isVirtual)
-  archivedEdgeResponse.io.rightIsVirtual := (if (rightL0Elastic) io.rightL0VertexInput.updateGet3.archivedState.isVirtual
-    else io.rightVertexInput.updateGet3.state.isVirtual)
+  val leftL0Elastic = config.vertexHasElasticLayers(leftL0Vertex)
+  val rightL0Elastic = config.vertexHasElasticLayers(rightL0Vertex)
+
+  def archivedShadowFor(l0Elastic: Boolean, l0Shadow: => VertexShadowResult, liveShadow: => VertexShadowResult, isUpper: Boolean): VertexShadowResult = {
+    if (!l0Elastic) liveShadow
+    else if (!isFusionSameL0 || isUpper) l0Shadow
+    else RegNext(l0Shadow)
+  }
+  def archivedIsVirtualFor(l0Elastic: Boolean, l0IsVirtual: => Bool, liveIsVirtual: => Bool, isUpper: Boolean): Bool = {
+    if (!l0Elastic) liveIsVirtual
+    else if (!isFusionSameL0 || isUpper) l0IsVirtual
+    else RegNext(l0IsVirtual)
+  }
+
+  archivedEdgeResponse.io.leftShadow := archivedShadowFor(leftL0Elastic,
+    io.leftL0VertexInput.updateGet3.archivedShadow, io.leftVertexInput.updateGet3.shadow, leftIsUpper)
+  archivedEdgeResponse.io.rightShadow := archivedShadowFor(rightL0Elastic,
+    io.rightL0VertexInput.updateGet3.archivedShadow, io.rightVertexInput.updateGet3.shadow, rightIsUpper)
+  archivedEdgeResponse.io.leftIsVirtual := archivedIsVirtualFor(leftL0Elastic,
+    io.leftL0VertexInput.updateGet3.archivedState.isVirtual, io.leftVertexInput.updateGet3.state.isVirtual, leftIsUpper)
+  archivedEdgeResponse.io.rightIsVirtual := archivedIsVirtualFor(rightL0Elastic,
+    io.rightL0VertexInput.updateGet3.archivedState.isVirtual, io.rightVertexInput.updateGet3.state.isVirtual, rightIsUpper)
   archivedEdgeResponse.io.leftVertex := leftVertex
   archivedEdgeResponse.io.rightVertex := rightVertex
   archivedEdgeResponse.io.remaining := stages.updateGet3.remainingVsElasticLayers
 
-  // Accumulation registers for scan results
+  // Accumulation registers for scan results.
+  // Fusion edges with same L0 counterpart accumulate at scanIndex+1 (they capture the lower endpoint
+  // on tick i, then compute when the upper endpoint arrives on tick i+1).
   val edgeLayer = config.edgeLayerOf(edgeIndex)
-  val scanAddresses = edgeLayer.map(l => config.archiveScanAddressesOf(l)).getOrElse(Seq())
+  val scanAddresses = if (isFusionSameL0) {
+    edgeLayer.map(l => config.archiveScanAddressesOf(l).map(_ + 1)).getOrElse(Seq())
+  } else {
+    edgeLayer.map(l => config.archiveScanAddressesOf(l)).getOrElse(Seq())
+  }
 
   val accMaxGrowable = Reg(ConvergecastMaxGrowable(config.weightBits))
   accMaxGrowable.length.init(accMaxGrowable.length.maxValue)
@@ -325,10 +381,16 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   accConflict.vertex1.init(convergecastConflictBitsInit)
   accConflict.vertex2.init(convergecastConflictBitsInit)
 
-  // Reset accumulators when scan starts
+  // Reset accumulators when scan starts (full bundle assign; partial assign trips Spinal unassigned-Reg lint)
   when(io.edgeScanActive && io.edgeScanIndex === 0) {
     accMaxGrowable.length := accMaxGrowable.length.maxValue
     accConflict.valid := False
+    accConflict.node1 := convergecastConflictBitsInit
+    accConflict.node2 := convergecastConflictBitsInit
+    accConflict.touch1 := convergecastConflictBitsInit
+    accConflict.touch2 := convergecastConflictBitsInit
+    accConflict.vertex1 := convergecastConflictBitsInit
+    accConflict.vertex2 := convergecastConflictBitsInit
   }
 
   // Accumulate during scan: check if current scan index is relevant to this edge's layer
@@ -336,13 +398,13 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
     // Pipeline delay: scan index fed at offload, result arrives at updateGet3 after executeLatency cycles.
     // Track the scan index through the pipeline to know which address produced the current result.
     val scanIndexPipelined = Delay(io.edgeScanIndex, config.executeLatency)
-    val scanActivePipelined = Delay(io.edgeScanActive, config.executeLatency)
+    val scanFeedingPipelined = Delay(io.edgeScanFeeding, config.executeLatency)
 
     val addressRelevant = scanAddresses.map(addr =>
       scanIndexPipelined === U(addr, config.archiveAddressBits bits)
     ).reduce(_ || _)
 
-    when(scanActivePipelined && addressRelevant) {
+    when(scanFeedingPipelined && addressRelevant) {
       when(archivedEdgeResponse.io.maxGrowable.length < accMaxGrowable.length) {
         accMaxGrowable := archivedEdgeResponse.io.maxGrowable
       }
@@ -428,6 +490,7 @@ class EdgeTest extends AnyFunSuite {
       edge.io.rightL0VertexInput.assignDontCare()
       edge.io.message.assignDontCare()
       edge.io.edgeScanActive := False
+      edge.io.edgeScanFeeding := False
       edge.io.edgeScanIndex := U(0, config.archiveAddressBits bits)
     })
   }
@@ -460,6 +523,7 @@ object EdgeEstimation extends App {
       edge.io.rightL0VertexInput.assignDontCare()
       edge.io.message.assignDontCare()
       edge.io.edgeScanActive := False
+      edge.io.edgeScanFeeding := False
       edge.io.edgeScanIndex := U(0, config.archiveAddressBits bits)
     })
     println(s"$name:")

@@ -116,6 +116,20 @@ case class DualConfig(
   /** BRAM indices that an edge at layer `edgeLayer` should check: L, L+numLayers, L+2*numLayers, ... */
   def archiveScanAddressesOf(edgeLayer: Int): Seq[Int] =
     (edgeLayer until archiveDepth by numLayers.toInt)
+  /** True if this is a fusion edge whose both endpoints map to the same layer-0 counterpart vertex. */
+  def isFusionEdgeSameL0(edgeIndex: Int): Boolean = {
+    val (l, r) = incidentVerticesOf(edgeIndex)
+    val ll0 = layer0CounterpartOf(l)
+    val rl0 = layer0CounterpartOf(r)
+    ll0 == rl0 && vertexHasElasticLayers(ll0)
+  }
+  /** For a fusion edge with same L0 counterpart, which endpoint is the upper layer (needs scanIndex+1). */
+  def fusionEdgeUpperVertex(edgeIndex: Int): Int = {
+    val (l, r) = incidentVerticesOf(edgeIndex)
+    val ll = vertexLayerId.getOrElse(l, -1)
+    val rl = vertexLayerId.getOrElse(r, -1)
+    if (ll > rl) l else r
+  }
 
   if (filename != null) {
     val source = scala.io.Source.fromFile(filename)

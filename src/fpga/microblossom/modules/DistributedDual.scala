@@ -99,6 +99,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
 
   // Archive state machine signals (declared here so edge wiring below can reference them)
   val edgeScanActive = Bool()
+  val edgeScanFeeding = Bool()  // true only during feeding phase, false during drain
   val edgeScanIndex = UInt(config.archiveAddressBits bits)
   val archiveWriteAddr = UInt(config.archiveAddressBits bits)
   val scanWritebackEn = Bool()
@@ -116,6 +117,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     edge.io.leftL0VertexInput := vertices(leftL0).io.stageOutputs
     edge.io.rightL0VertexInput := vertices(rightL0).io.stageOutputs
     edge.io.edgeScanActive := edgeScanActive
+    edge.io.edgeScanFeeding := edgeScanFeeding
     edge.io.edgeScanIndex := edgeScanIndex
   }
 
@@ -147,8 +149,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
 
     val affectsArchive =
       broadcastRegInserted.valid &&
-        broadcastRegInserted.instruction.affectsElasticArchivedDualState() &&
-        !broadcastRegInserted.instruction.isArchiveElasticSlice()
+        broadcastRegInserted.instruction.affectsElasticArchivedDualState()
 
     // On ArchiveElasticSlice: increment write counter
     when(isArchiveSlice) {
@@ -200,6 +201,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       (writebackTick < archiveValidCount.resize(scanTickWidth))
 
     edgeScanActive := scanActive
+    edgeScanFeeding := scanFeeding
     edgeScanIndex := scanTick.resize(config.archiveAddressBits)
     archiveWriteAddr := archiveWriteCounter
     scanWritebackEn := writebackValid
@@ -210,6 +212,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     broadcastMessage.valid := io.message.valid && !scanActive
   } else {
     edgeScanActive := False
+    edgeScanFeeding := False
     edgeScanIndex := U(0, config.archiveAddressBits bits)
     archiveWriteAddr := U(0, config.archiveAddressBits bits)
     scanWritebackEn := False

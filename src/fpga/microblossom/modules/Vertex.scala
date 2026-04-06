@@ -136,9 +136,11 @@ case class Vertex(
 
   val resetVertexState = VertexState.resetValue(config, vertexIndex)
 
-  // Capture the last valid instruction for archived execute (constant during scan).
+  // Capture only state-modifying instructions for archived execute (constant during scan).
+  // ArchiveElasticSlice triggers a scan but shouldn't modify archived state, so exclude it.
   val capturedMessage = Reg(BroadcastMessage(config))
-  when(message.valid) {
+  when(message.valid && message.instruction.affectsElasticArchivedDualState()
+    && !message.instruction.isArchiveElasticSlice()) {
     capturedMessage := message
   }
 
@@ -157,8 +159,8 @@ case class Vertex(
     )
     for (localIndex <- 0 until config.numIncidentEdgeOf(vertexIndex)) {
       tightCounter.io.tights(localIndex) :=
-        (if (elastic) io.edgeInputs(localIndex).offloadGet2.isTightExFusionVsElasticLayers
-         else io.edgeInputs(localIndex).offloadGet2.isTightExFusion)
+        io.edgeInputs(localIndex).offloadGet2.isTightExFusion ||
+        io.edgeInputs(localIndex).offloadGet2.isTightExFusionVsElasticLayers
     }
     stages.offloadSet3.isUniqueTight := tightCounter.io.isUnique
     stages.offloadSet3.isIsolated := tightCounter.io.isIsolated
@@ -217,8 +219,8 @@ case class Vertex(
     vertexPropagatingPeer.io.grown := stages.executeGet3.state.grown
     for (localIndex <- 0 until config.numIncidentEdgeOf(vertexIndex)) {
       vertexPropagatingPeer.io.edgeIsTight(localIndex) :=
-        (if (elastic) io.edgeInputs(localIndex).executeGet3.isTightVsElasticLayers
-         else io.edgeInputs(localIndex).executeGet3.isTight)
+        io.edgeInputs(localIndex).executeGet3.isTight ||
+        io.edgeInputs(localIndex).executeGet3.isTightVsElasticLayers
       vertexPropagatingPeer.io.peerSpeed(localIndex) := io.peerVertexInputsExecute3(localIndex).state.speed
       vertexPropagatingPeer.io.peerNode(localIndex) := io.peerVertexInputsExecute3(localIndex).state.node
       vertexPropagatingPeer.io.peerRoot(localIndex) := io.peerVertexInputsExecute3(localIndex).state.root
