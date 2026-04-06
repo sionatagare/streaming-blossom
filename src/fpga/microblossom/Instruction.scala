@@ -110,6 +110,18 @@ case class Instruction(config: DualConfig = DualConfig()) extends Bits {
     base || extAffects
   }
 
+  /** Instructions that modify archived vertex state — triggers a scan to update archivedRegs and recompute edge results.
+    * Included: Grow (changes grown), SetSpeed (changes speed), SetBlossom/Match (changes node/root).
+    * Excluded: AddDefect (targets live vertices only), Reset (clears archiveValidCount),
+    * ArchiveElasticSlice (creates entry, doesn't modify existing), LoadDefectsExternal (layer timing),
+    * edge-weight ops (don't touch vertex state), FindObstacle (read-only).
+    */
+  def needsArchivedScan(): Bool = {
+    val base = isSetSpeed() || isSetBlossom() || (opCode === OpCode.Match)
+    val extNeedsScan = isExtended && isGrow
+    base || extNeedsScan
+  }
+
   def assignExtendedOpCode(code: Int) = {
     opCode := OpCode.SetSpeed
     extensionIndicator := True.asBits

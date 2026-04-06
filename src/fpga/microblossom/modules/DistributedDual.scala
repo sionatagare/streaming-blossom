@@ -149,7 +149,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
 
     val affectsArchive =
       broadcastRegInserted.valid &&
-        broadcastRegInserted.instruction.affectsElasticArchivedDualState()
+        broadcastRegInserted.instruction.needsArchivedScan()
 
     // On ArchiveElasticSlice: increment write counter
     when(isArchiveSlice) {
