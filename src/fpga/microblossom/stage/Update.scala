@@ -11,47 +11,50 @@ import spinal.lib._
  */
 
 case class StageUpdateVertex(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val isStalled = Bool
   val compact = BroadcastCompact(config)
   val propagatingPeer = VertexPropagatingPeerResult(config.vertexBits)
-  val archivedPropagatingPeer = VertexPropagatingPeerResult(config.vertexBits)
+  val archivedPropagatingPeer = elastic generate VertexPropagatingPeerResult(config.vertexBits)
 
   def connect(last: StageExecuteVertex3) = {
     state := last.state
-    archivedState := last.archivedState
+    if (elastic) archivedState := last.archivedState
     isStalled := last.isStalled
     compact := last.compact
   }
 }
 
 case class StageUpdateVertex2(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val isStalled = Bool
   val compact = BroadcastCompact(config)
   val propagatingPeer = VertexPropagatingPeerResult(config.vertexBits)
-  val archivedPropagatingPeer = VertexPropagatingPeerResult(config.vertexBits)
+  val archivedPropagatingPeer = elastic generate VertexPropagatingPeerResult(config.vertexBits)
 
   def connect(last: StageUpdateVertex) = {
     compact := last.compact
     isStalled := last.isStalled
     propagatingPeer := last.propagatingPeer
-    archivedPropagatingPeer := last.archivedPropagatingPeer
+    if (elastic) archivedPropagatingPeer := last.archivedPropagatingPeer
   }
 }
 
 case class StageUpdateVertex3(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val shadow = VertexShadowResult(config.vertexBits)
-  val archivedShadow = VertexShadowResult(config.vertexBits)
+  val archivedShadow = elastic generate VertexShadowResult(config.vertexBits)
   val compact = BroadcastCompact(config)
 
   def connect(last: StageUpdateVertex2) = {
     state := last.state
-    archivedState := last.archivedState
+    if (elastic) archivedState := last.archivedState
     compact := last.compact
   }
 }

@@ -110,13 +110,11 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     val (leftVertex, rightVertex) = config.incidentVerticesOf(edgeIndex)
     edge.io.leftVertexInput := vertices(leftVertex).io.stageOutputs
     edge.io.rightVertexInput := vertices(rightVertex).io.stageOutputs
-    // Layer-0 counterpart scan outputs for archived edge computation
+    // Layer-0 counterpart stage outputs for archived state at pipeline stages
     val leftL0 = config.layer0CounterpartOf(leftVertex)
     val rightL0 = config.layer0CounterpartOf(rightVertex)
-    edge.io.leftScanStateA := vertices(leftL0).io.scanStateA
-    edge.io.leftScanStateB := vertices(leftL0).io.scanStateB
-    edge.io.rightScanStateA := vertices(rightL0).io.scanStateA
-    edge.io.rightScanStateB := vertices(rightL0).io.scanStateB
+    edge.io.leftL0VertexInput := vertices(leftL0).io.stageOutputs
+    edge.io.rightL0VertexInput := vertices(rightL0).io.stageOutputs
     edge.io.edgeScanActive := edgeScanActive
     edge.io.edgeScanIndex := edgeScanIndex
   }
@@ -499,6 +497,90 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
   }
 }
 
+/** DualConfig helpers for archive-related tests (also used by [[MultiLayerArchiveSimCache]]). */
+private object ArchiveTestFixtures {
+  def archiveTestConfig(archiveDepth: Int = 3, contextDepth: Int = 1): (DualConfig, DualConfig) = {
+    val config = DualConfig(
+      filename = "./resources/graphs/example_phenomenological_rotated_d3.json",
+      minimizeBits = false,
+      archiveDepth = archiveDepth
+    )
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = contextDepth
+    config.sanityCheck()
+    (config, ioConfig)
+  }
+}
+
+/** One Verilator build for all `archiveDepth = 4` simulations in [[MultiLayerArchiveTest]]. */
+private object MultiLayerArchiveSimCache {
+  lazy val archiveDepth4: (DualConfig, DualConfig, SimCompiled[DistributedDual]) = {
+    val (config, ioConfig) = ArchiveTestFixtures.archiveTestConfig(archiveDepth = 4)
+    val compiled = Config.sim.compile { val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut }
+    (config, ioConfig, compiled)
+  }
+}
+
+/** Verilator is invoked for every `Config.sim.compile`. ScalaTest uses a fresh suite instance per
+  * test, so caches must live in an `object`, not in the test class.
+  */
+private object DistributedDualSimCache {
+  lazy val codeCapacityD3Pipeline: (DualConfig, DualConfig, SimCompiled[DistributedDual]) = {
+    val config = DualConfig(filename = "./resources/graphs/example_code_capacity_d3.json", minimizeBits = false)
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.sanityCheck()
+    val compiled = Config.sim.compile {
+      val dut = DistributedDual(config, ioConfig)
+      dut.simMakePublicSnapshot()
+      dut
+    }
+    (config, ioConfig, compiled)
+  }
+
+  lazy val phenomenologicalRotatedD3LayerFusionCtx1: (DualConfig, DualConfig, SimCompiled[DistributedDual]) = {
+    val config = DualConfig(
+      filename = "./resources/graphs/example_phenomenological_rotated_d3.json",
+      minimizeBits = false
+    )
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 1
+    config.sanityCheck()
+    val compiled = Config.sim.compile {
+      val dut = DistributedDual(config, ioConfig)
+      dut.simMakePublicSnapshot()
+      dut
+    }
+    (config, ioConfig, compiled)
+  }
+
+  lazy val phenomenologicalRotatedD3LayerFusionCtx2: (DualConfig, DualConfig, SimCompiled[DistributedDual]) = {
+    val config = DualConfig(
+      filename = "./resources/graphs/example_phenomenological_rotated_d3.json",
+      minimizeBits = false
+    )
+    config.supportLayerFusion = true
+    val ioConfig = DualConfig()
+    config.graph.offloading = Seq()
+    config.fitGraph(minimizeBits = false)
+    config.contextDepth = 2
+    config.sanityCheck()
+    val compiled = Config.sim.compile {
+      val dut = DistributedDual(config, ioConfig)
+      dut.simMakePublicSnapshot()
+      dut
+    }
+    (config, ioConfig, compiled)
+  }
+}
+
 // sbt 'testOnly microblossom.modules.DistributedDualTest'
 class DistributedDualTest extends AnyFunSuite {
 
@@ -513,18 +595,8 @@ class DistributedDualTest extends AnyFunSuite {
 
   test("test pipeline registers") {
     // gtkwave simWorkspace/DistributedDual/testA.fst
-    val config = DualConfig(filename = "./resources/graphs/example_code_capacity_d3.json", minimizeBits = false)
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq() // remove all offloaders
-    config.fitGraph(minimizeBits = false)
-    config.sanityCheck()
-    Config.sim
-      .compile({
-        val dut = DistributedDual(config, ioConfig)
-        dut.simMakePublicSnapshot()
-        dut
-      })
-      .doSim("testA") { dut =>
+    val (config, ioConfig, compiled) = DistributedDualSimCache.codeCapacityD3Pipeline
+    compiled.doSim("testA") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
 
@@ -573,23 +645,8 @@ class DistributedDualTest extends AnyFunSuite {
     //   v0  ← v8's state (which was v16's old), v8 ← v16's (which was v24's from round 1), etc.
     //
     // gtkwave simWorkspace/DistributedDual/testChainShift.fst
-    val config = DualConfig(
-      filename = "./resources/graphs/example_phenomenological_rotated_d3.json",
-      minimizeBits = false
-    )
-    config.supportLayerFusion = true
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq() // remove all offloaders
-    config.fitGraph(minimizeBits = false)
-    config.contextDepth = 1
-    config.sanityCheck()
-    Config.sim
-      .compile({
-        val dut = DistributedDual(config, ioConfig)
-        dut.simMakePublicSnapshot()
-        dut
-      })
-      .doSim("testChainShift") { dut =>
+    val (config, ioConfig, compiled) = DistributedDualSimCache.phenomenologicalRotatedD3LayerFusionCtx1
+    compiled.doSim("testChainShift") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
 
@@ -682,24 +739,8 @@ class DistributedDualTest extends AnyFunSuite {
     // into its `layers` BRAM by reading it back via a simulation-only debug read port.
     //
     // gtkwave simWorkspace/DistributedDual/testLayersCommit.fst
-    val config = DualConfig(
-      filename = "./resources/graphs/example_phenomenological_rotated_d3.json",
-      minimizeBits = false
-    )
-    config.supportLayerFusion = true
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq()
-    config.fitGraph(minimizeBits = false)
-    config.contextDepth = 1
-    config.sanityCheck()
-
-    Config.sim
-      .compile({
-        val dut = DistributedDual(config, ioConfig)
-        dut.simMakePublicSnapshot()
-        dut
-      })
-      .doSim("testLayersCommit") { dut =>
+    val (config, ioConfig, compiled) = DistributedDualSimCache.phenomenologicalRotatedD3LayerFusionCtx1
+    compiled.doSim("testLayersCommit") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
 
@@ -768,16 +809,8 @@ class DistributedDualTest extends AnyFunSuite {
     //   v8  <- v16's old state (reset/virtual)
     //   v0  <- v8's old state  (reset/virtual)
     //   v24 <- reset (top layer, mode 2)
-    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
-    config.supportLayerFusion = true
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq()
-    config.fitGraph(minimizeBits = false)
-    config.contextDepth = 1
-    config.sanityCheck()
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testBasicShift") { dut =>
+    val (config, ioConfig, compiled) = DistributedDualSimCache.phenomenologicalRotatedD3LayerFusionCtx1
+    compiled.doSim("testBasicShift") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -843,16 +876,8 @@ class DistributedDualTest extends AnyFunSuite {
     // Now v4 would normally propagate v12's node. But during ArchiveElasticSlice, holdForArchive
     // blocks this — v4's state after the archive should be its donor's (v12's pre-shift) state,
     // not a propagated state.
-    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
-    config.supportLayerFusion = true
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq()
-    config.fitGraph(minimizeBits = false)
-    config.contextDepth = 1
-    config.sanityCheck()
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testHoldForArchive") { dut =>
+    val (config, ioConfig, compiled) = DistributedDualSimCache.phenomenologicalRotatedD3LayerFusionCtx1
+    compiled.doSim("testHoldForArchive") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -896,16 +921,8 @@ class DistributedDualTest extends AnyFunSuite {
   test("non-column vertices unaffected by ArchiveElasticSlice") {
     // Virtual vertices not in any layer column (v1, v2, v5, v6, v9, v10, v13, v14, etc.)
     // should have archShiftMode=0 and be completely unchanged by ArchiveElasticSlice.
-    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
-    config.supportLayerFusion = true
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq()
-    config.fitGraph(minimizeBits = false)
-    config.contextDepth = 1
-    config.sanityCheck()
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testNonColumnUnaffected") { dut =>
+    val (config, ioConfig, compiled) = DistributedDualSimCache.phenomenologicalRotatedD3LayerFusionCtx1
+    compiled.doSim("testNonColumnUnaffected") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -948,16 +965,8 @@ class DistributedDualTest extends AnyFunSuite {
     // With contextBits > 0, vertex state lives in `ram`, not `register`.
     // To observe a specific context's state, we issue FindObstacle for that context and
     // read the pipeline output (stageOutputs.updateGet3.state).
-    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
-    config.supportLayerFusion = true
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq()
-    config.fitGraph(minimizeBits = false)
-    config.contextDepth = 2
-    config.sanityCheck()
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testContextShift") { dut =>
+    val (config, ioConfig, compiled) = DistributedDualSimCache.phenomenologicalRotatedD3LayerFusionCtx2
+    compiled.doSim("testContextShift") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1036,16 +1045,8 @@ class DistributedDualTest extends AnyFunSuite {
     // Two adjacent top-layer defects v24 and v27. After growing, edge v24-v27 (edge 52, weight=2)
     // becomes tight. After ArchiveElasticSlice, the states shift to v16 and v19.
     // Edge v16-v19 (edge 35, weight=2) should detect a conflict between the two shifted clusters.
-    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
-    config.supportLayerFusion = true
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq()
-    config.fitGraph(minimizeBits = false)
-    config.contextDepth = 1
-    config.sanityCheck()
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testShiftTightness") { dut =>
+    val (config, ioConfig, compiled) = DistributedDualSimCache.phenomenologicalRotatedD3LayerFusionCtx1
+    compiled.doSim("testShiftTightness") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1088,16 +1089,8 @@ class DistributedDualTest extends AnyFunSuite {
     // growth amounts. Since contextDepth=1 there is only 1 layers slot, so each archive
     // overwrites the previous. Verify via layersDebugData that layers[0] always holds the
     // most recently archived state.
-    val config = DualConfig(filename = "./resources/graphs/example_phenomenological_rotated_d3.json", minimizeBits = false)
-    config.supportLayerFusion = true
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq()
-    config.fitGraph(minimizeBits = false)
-    config.contextDepth = 1
-    config.sanityCheck()
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testMultipleArchives") { dut =>
+    val (config, ioConfig, compiled) = DistributedDualSimCache.phenomenologicalRotatedD3LayerFusionCtx1
+    compiled.doSim("testMultipleArchives") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1147,26 +1140,10 @@ class MultiLayerArchiveTest extends AnyFunSuite {
   // Multi-layer archive tests
   // ========================================================================
 
-  /** Helper: standard phenomenological d3 config with layer fusion and archiveDepth. */
-  def archiveTestConfig(archiveDepth: Int = 3, contextDepth: Int = 1): (DualConfig, DualConfig) = {
-    val config = DualConfig(
-      filename = "./resources/graphs/example_phenomenological_rotated_d3.json",
-      minimizeBits = false,
-      archiveDepth = archiveDepth
-    )
-    config.supportLayerFusion = true
-    val ioConfig = DualConfig()
-    config.graph.offloading = Seq()
-    config.fitGraph(minimizeBits = false)
-    config.contextDepth = contextDepth
-    config.sanityCheck()
-    (config, ioConfig)
-  }
-
   // ---------- DualConfig unit tests ----------
 
   test("layer0CounterpartOf maps correctly") {
-    val (config, _) = archiveTestConfig()
+    val (config, _) = ArchiveTestFixtures.archiveTestConfig()
     // Layer 0: v0,v3,v4,v7 → self
     assert(config.layer0CounterpartOf(0) == 0)
     assert(config.layer0CounterpartOf(3) == 3)
@@ -1192,7 +1169,7 @@ class MultiLayerArchiveTest extends AnyFunSuite {
   }
 
   test("edgeLayerOf returns correct layers") {
-    val (config, _) = archiveTestConfig()
+    val (config, _) = ArchiveTestFixtures.archiveTestConfig()
     // Horizontal edges within layers
     // Edge 1: v0-v3 → layer 0
     assert(config.edgeLayerOf(1) == Some(0))
@@ -1211,7 +1188,7 @@ class MultiLayerArchiveTest extends AnyFunSuite {
   }
 
   test("archiveScanAddressesOf distributes correctly") {
-    val (config, _) = archiveTestConfig(archiveDepth = 12)
+    val (config, _) = ArchiveTestFixtures.archiveTestConfig(archiveDepth = 12)
     // 4 layers, archiveDepth=12
     // Layer 0: 0, 4, 8
     assert(config.archiveScanAddressesOf(0) == Seq(0, 4, 8))
@@ -1225,7 +1202,7 @@ class MultiLayerArchiveTest extends AnyFunSuite {
   }
 
   test("archiveScanAddressesOf with non-multiple depth") {
-    val (config, _) = archiveTestConfig(archiveDepth = 6)
+    val (config, _) = ArchiveTestFixtures.archiveTestConfig(archiveDepth = 6)
     // 4 layers, archiveDepth=6
     // Layer 0: 0, 4
     assert(config.archiveScanAddressesOf(0) == Seq(0, 4))
@@ -1242,10 +1219,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
 
   test("archive write populates archivedRegs") {
     // After ArchiveElasticSlice, the pre-shift state should be in archivedRegs[writeAddr].
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testArchiveRegsWrite") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testArchiveRegsWrite") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1292,10 +1267,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
 
   test("archivedRegs not overwritten by subsequent archives") {
     // Verify that archivedRegs[i] is only written during its own archive, not later ones.
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testArchiveRegsNoOverwrite") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testArchiveRegsNoOverwrite") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1333,10 +1306,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
 
   test("capturedMessage applies instruction to archived state") {
     // After Grow, archived vertices in the scan should have their grown values updated.
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testCapturedMessage") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testCapturedMessage") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1380,10 +1351,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
   test("scan writeback updates archivedRegs and BRAM") {
     // After a Grow instruction with scan active, archivedRegs should be updated AND
     // the BRAM should be updated (verifiable via layersDebugData).
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testScanWriteback") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testScanWriteback") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1425,10 +1394,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
   test("live maxGrowable captured correctly during scan") {
     // The live result should be captured when compact.valid is true (cycle 0 of instruction).
     // During scan cycles the captured register should hold the correct value.
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testLiveResultCapture") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testLiveResultCapture") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1457,10 +1424,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
   test("live state not double-written during scan") {
     // After Grow, the live vertex state should reflect exactly one Grow application,
     // not multiple (which would happen if the scan replayed the instruction to live state).
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testLiveNoDoubleWrite") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testLiveNoDoubleWrite") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1501,10 +1466,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
     // Two defects on v24 and v27 (layer 3). Grow until edge v24-v27 (weight=2) is tight.
     // Archive. Now the archived state lives in v0 and v3's archivedRegs.
     // Grow further. The archived edge (layer 0, edge 1 between v0-v3) should detect tightness.
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testArchivedEdgeTight") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testArchivedEdgeTight") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1548,10 +1511,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
 
   test("FindObstacle does not trigger scan") {
     // FindObstacle should not set scanActive (it doesn't affect archived state).
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testNoScanForReadOnly") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testNoScanForReadOnly") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1585,10 +1546,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
 
   test("multiple archives then grow updates all archived entries") {
     // Archive 3 times, then Grow. All 3 archivedRegs entries with speed=Grow should be updated.
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testMultiArchiveThenGrow") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testMultiArchiveThenGrow") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
@@ -1638,10 +1597,8 @@ class MultiLayerArchiveTest extends AnyFunSuite {
   // ---------- Busy signal timing test ----------
 
   test("busy signal high during scan, low after") {
-    val (config, ioConfig) = archiveTestConfig(archiveDepth = 4)
-    Config.sim
-      .compile({ val dut = DistributedDual(config, ioConfig); dut.simMakePublicSnapshot(); dut })
-      .doSim("testBusyTiming") { dut =>
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testBusyTiming") { dut =>
         dut.io.message.valid #= false
         dut.clockDomain.forkStimulus(period = 10)
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }

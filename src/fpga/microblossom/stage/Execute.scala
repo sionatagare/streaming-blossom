@@ -10,21 +10,23 @@ import spinal.lib._
  */
 
 case class StageExecuteVertex(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val message = BroadcastMessage(config)
   val isStalled = Bool
 
   def connect(last: StageOffloadVertex4) = {
     state := last.state
-    archivedState := last.archivedState
+    if (elastic) archivedState := last.archivedState
     message := last.message
   }
 }
 
 case class StageExecuteVertex2(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val isStalled = Bool
   // throw away the broadcast message because it's not used later on
   val compact = BroadcastCompact(config)
@@ -36,14 +38,15 @@ case class StageExecuteVertex2(config: DualConfig, vertexIndex: Int) extends Bun
 }
 
 case class StageExecuteVertex3(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val isStalled = Bool
   val compact = BroadcastCompact(config)
 
   def connect(last: StageExecuteVertex2) = {
     state := last.state
-    archivedState := last.archivedState
+    if (elastic) archivedState := last.archivedState
     isStalled := last.isStalled
     compact := last.compact
   }

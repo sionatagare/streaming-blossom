@@ -77,8 +77,6 @@ case class Vertex(
     val archiveWriteAddr = in UInt (config.archiveAddressBits bits)
     /** Edge scan: index into archivedRegs for pipeline input. */
     val scanIndex = in UInt (config.archiveAddressBits bits)
-    val scanStateA = out(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)))
-    val scanStateB = out(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)))
     /** Scan writeback: the scan index that just exited the pipeline, and enable. */
     val scanWritebackIndex = in UInt (config.archiveAddressBits bits)
     val scanWritebackEn = in(Bool())
@@ -136,19 +134,7 @@ case class Vertex(
     layersDebugData := layers.readAsync(layersDebugAddr)
   }
 
-  // Scan output: read from register file (combinational MUX, no BRAM access).
   val resetVertexState = VertexState.resetValue(config, vertexIndex)
-  if (elastic) {
-    io.scanStateA := archivedRegs(io.scanIndex)
-    io.scanStateB := Mux(
-      io.scanIndex < U(config.archiveDepth - 1, config.archiveAddressBits bits),
-      archivedRegs(io.scanIndex + 1),
-      resetVertexState
-    )
-  } else {
-    io.scanStateA := resetVertexState
-    io.scanStateB := resetVertexState
-  }
 
   // Capture the last valid instruction for archived execute (constant during scan).
   val capturedMessage = Reg(BroadcastMessage(config))
@@ -158,9 +144,9 @@ case class Vertex(
 
   stages.offloadSet.message := message
   stages.offloadSet.state := Mux(message.isReset, resetVertexState, fetchState)
-  // archivedState is fed from scan register file output (scanStateA) for this vertex.
-  // For non-elastic vertices, it's just the reset value.
-  stages.offloadSet.archivedState := (if (elastic) io.scanStateA else resetVertexState)
+  if (elastic) {
+    stages.offloadSet.archivedState := archivedRegs(io.scanIndex)
+  }
 
   stages.offloadSet2.connect(stages.offloadGet)
 
@@ -203,19 +189,21 @@ case class Vertex(
     vertexPostExecuteState.io.isStalled := stages.executeGet.isStalled
     stages.executeSet2.state := vertexPostExecuteState.io.after
 
-    // Apply captured instruction to archived state
-    var archivedPostExecute = VertexPostExecuteState(
-      config = config,
-      vertexIndex = vertexIndex
-    )
-    archivedPostExecute.io.before := stages.executeGet.archivedState
-    archivedPostExecute.io.message := capturedMessage
-    if (config.vertexLayerId.contains(vertexIndex)) {
-      archivedPostExecute.io.isStalled := stages.executeGet.archivedState.isVirtual
-    } else {
-      archivedPostExecute.io.isStalled := False
+    if (elastic) {
+      // Apply captured instruction to archived state
+      var archivedPostExecute = VertexPostExecuteState(
+        config = config,
+        vertexIndex = vertexIndex
+      )
+      archivedPostExecute.io.before := stages.executeGet.archivedState
+      archivedPostExecute.io.message := capturedMessage
+      if (config.vertexLayerId.contains(vertexIndex)) {
+        archivedPostExecute.io.isStalled := stages.executeGet.archivedState.isVirtual
+      } else {
+        archivedPostExecute.io.isStalled := False
+      }
+      stages.executeSet2.archivedState := archivedPostExecute.io.after
     }
-    stages.executeSet2.archivedState := archivedPostExecute.io.after
   }
 
   stages.executeSet3.connect(stages.executeGet2)
@@ -237,20 +225,31 @@ case class Vertex(
     }
     stages.updateSet.propagatingPeer := vertexPropagatingPeer.io.peer
 
-    // Archived peer propagation: same logic but from archivedState + archived tight signals
-    var archivedPropagatingPeer = VertexPropagatingPeer(
-      config = config,
-      vertexIndex = vertexIndex
-    )
-    archivedPropagatingPeer.io.grown := stages.executeGet3.archivedState.grown
-    for (localIndex <- 0 until config.numIncidentEdgeOf(vertexIndex)) {
-      archivedPropagatingPeer.io.edgeIsTight(localIndex) :=
-        io.edgeInputs(localIndex).executeGet3.isTightVsElasticLayers
-      archivedPropagatingPeer.io.peerSpeed(localIndex) := io.peerVertexInputsExecute3(localIndex).archivedState.speed
-      archivedPropagatingPeer.io.peerNode(localIndex) := io.peerVertexInputsExecute3(localIndex).archivedState.node
-      archivedPropagatingPeer.io.peerRoot(localIndex) := io.peerVertexInputsExecute3(localIndex).archivedState.root
+    if (elastic) {
+      // Archived peer propagation: same logic but from archivedState + archived tight signals.
+      // Only peers that are also elastic have archivedState; others use reset defaults.
+      var archivedPropagatingPeer = VertexPropagatingPeer(
+        config = config,
+        vertexIndex = vertexIndex
+      )
+      archivedPropagatingPeer.io.grown := stages.executeGet3.archivedState.grown
+      for ((edgeIndex, localIndex) <- config.incidentEdgesOf(vertexIndex).zipWithIndex) {
+        val peerVi = config.peerVertexOfEdge(edgeIndex, vertexIndex)
+        val peerElastic = config.vertexHasElasticLayers(peerVi)
+        archivedPropagatingPeer.io.edgeIsTight(localIndex) :=
+          io.edgeInputs(localIndex).executeGet3.isTightVsElasticLayers
+        if (peerElastic) {
+          archivedPropagatingPeer.io.peerSpeed(localIndex) := io.peerVertexInputsExecute3(localIndex).archivedState.speed
+          archivedPropagatingPeer.io.peerNode(localIndex) := io.peerVertexInputsExecute3(localIndex).archivedState.node
+          archivedPropagatingPeer.io.peerRoot(localIndex) := io.peerVertexInputsExecute3(localIndex).archivedState.root
+        } else {
+          archivedPropagatingPeer.io.peerSpeed(localIndex) := Speed.Stay
+          archivedPropagatingPeer.io.peerNode(localIndex) := B(config.IndexNone, config.vertexBits bits)
+          archivedPropagatingPeer.io.peerRoot(localIndex) := B(config.IndexNone, config.vertexBits bits)
+        }
+      }
+      stages.updateSet.archivedPropagatingPeer := archivedPropagatingPeer.io.peer
     }
-    stages.updateSet.archivedPropagatingPeer := archivedPropagatingPeer.io.peer
   }
 
   stages.updateSet2.connect(stages.updateGet)
@@ -266,15 +265,17 @@ case class Vertex(
       stages.updateGet.compact.valid && stages.updateGet.compact.isArchiveElasticSlice
     stages.updateSet2.state := vertexPostUpdateState.io.after
 
-    // Archived post-update
-    var archivedPostUpdateState = VertexPostUpdateState(
-      config = config,
-      vertexIndex = vertexIndex
-    )
-    archivedPostUpdateState.io.before := stages.updateGet.archivedState
-    archivedPostUpdateState.io.propagator := stages.updateGet.archivedPropagatingPeer
-    archivedPostUpdateState.io.holdForArchive := False
-    stages.updateSet2.archivedState := archivedPostUpdateState.io.after
+    if (elastic) {
+      // Archived post-update
+      var archivedPostUpdateState = VertexPostUpdateState(
+        config = config,
+        vertexIndex = vertexIndex
+      )
+      archivedPostUpdateState.io.before := stages.updateGet.archivedState
+      archivedPostUpdateState.io.propagator := stages.updateGet.archivedPropagatingPeer
+      archivedPostUpdateState.io.holdForArchive := False
+      stages.updateSet2.archivedState := archivedPostUpdateState.io.after
+    }
   }
 
   stages.updateSet3.connect(stages.updateGet2)
@@ -293,19 +294,21 @@ case class Vertex(
     vertexShadow.io.propagator := stages.updateGet2.propagatingPeer
     stages.updateSet3.shadow := vertexShadow.io.shadow
 
-    // Archived shadow
-    var archivedVertexShadow = VertexShadow(
-      config = config,
-      vertexIndex = vertexIndex
-    )
-    archivedVertexShadow.io.isVirtual := stages.updateGet2.archivedState.isVirtual
-    archivedVertexShadow.io.node := stages.updateGet2.archivedState.node
-    archivedVertexShadow.io.root := stages.updateGet2.archivedState.root
-    archivedVertexShadow.io.speed := stages.updateGet2.archivedState.speed
-    archivedVertexShadow.io.grown := stages.updateGet2.archivedState.grown
-    archivedVertexShadow.io.isStalled := False
-    archivedVertexShadow.io.propagator := stages.updateGet2.archivedPropagatingPeer
-    stages.updateSet3.archivedShadow := archivedVertexShadow.io.shadow
+    if (elastic) {
+      // Archived shadow
+      var archivedVertexShadow = VertexShadow(
+        config = config,
+        vertexIndex = vertexIndex
+      )
+      archivedVertexShadow.io.isVirtual := stages.updateGet2.archivedState.isVirtual
+      archivedVertexShadow.io.node := stages.updateGet2.archivedState.node
+      archivedVertexShadow.io.root := stages.updateGet2.archivedState.root
+      archivedVertexShadow.io.speed := stages.updateGet2.archivedState.speed
+      archivedVertexShadow.io.grown := stages.updateGet2.archivedState.grown
+      archivedVertexShadow.io.isStalled := False
+      archivedVertexShadow.io.propagator := stages.updateGet2.archivedPropagatingPeer
+      stages.updateSet3.archivedShadow := archivedVertexShadow.io.shadow
+    }
   }
 
   val vertexResponse = VertexResponse(config, vertexIndex)

@@ -10,45 +10,49 @@ import spinal.lib._
  */
 
 case class StageOffloadVertex(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val message = BroadcastMessage(config)
 }
 
 case class StageOffloadVertex2(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val message = BroadcastMessage(config)
 
   def connect(last: StageOffloadVertex) = {
     state := last.state
-    archivedState := last.archivedState
+    if (elastic) archivedState := last.archivedState
     message := last.message
   }
 }
 
 case class StageOffloadVertex3(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val message = BroadcastMessage(config)
   val isUniqueTight = Bool // |incident tight edges| = 1
   val isIsolated = Bool // |incident tight edges| = 0
 
   def connect(last: StageOffloadVertex2) = {
     state := last.state
-    archivedState := last.archivedState
+    if (elastic) archivedState := last.archivedState
     message := last.message
   }
 }
 
 case class StageOffloadVertex4(config: DualConfig, vertexIndex: Int) extends Bundle {
+  private val elastic = config.vertexHasElasticLayers(vertexIndex)
   val state = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
-  val archivedState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
+  val archivedState = elastic generate VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   val message = BroadcastMessage(config)
 
   def connect(last: StageOffloadVertex3) = {
     state := last.state
-    archivedState := last.archivedState
+    if (elastic) archivedState := last.archivedState
     message := last.message
   }
 }

@@ -50,11 +50,11 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
     val stageOutputs = out(Edge.getStages(config).getStageOutput)
     val leftVertexInput = in(Vertex.getStages(config, leftVertex).getStageOutput)
     val rightVertexInput = in(Vertex.getStages(config, rightVertex).getStageOutput)
-    // Scan state from layer-0 counterpart vertices' register files
-    val leftScanStateA = in(VertexState(config.vertexBits, leftGrownBits))
-    val leftScanStateB = in(VertexState(config.vertexBits, leftGrownBits))
-    val rightScanStateA = in(VertexState(config.vertexBits, rightGrownBits))
-    val rightScanStateB = in(VertexState(config.vertexBits, rightGrownBits))
+    // Layer-0 counterpart vertex stage outputs (for archived state at pipeline stages)
+    val leftL0Vertex = config.layer0CounterpartOf(leftVertex)
+    val rightL0Vertex = config.layer0CounterpartOf(rightVertex)
+    val leftL0VertexInput = in(Vertex.getStages(config, leftL0Vertex).getStageOutput)
+    val rightL0VertexInput = in(Vertex.getStages(config, rightL0Vertex).getStageOutput)
     val edgeScanActive = in(Bool())
     val edgeScanIndex = in UInt (config.archiveAddressBits bits)
     // final outputs
@@ -122,22 +122,26 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
     }
   }
 
-  // Archived state comes from vertex stage archivedState field (fed from scan register file)
+  // Archived state comes from layer-0 counterpart vertex's archivedState in pipeline stages
   val conditionedVertexIsVirtualArch = if (hasLayerFusion) {
     val conditionedVertex = config.edgeConditionedVertex(edgeIndex)
-    if (conditionedVertex == leftVertex) {
-      io.leftVertexInput.offloadGet.archivedState.isVirtual
-    } else if (conditionedVertex == rightVertex) {
-      io.rightVertexInput.offloadGet.archivedState.isVirtual
+    val condL0 = config.layer0CounterpartOf(conditionedVertex)
+    if (config.vertexHasElasticLayers(condL0)) {
+      if (conditionedVertex == leftVertex) io.leftL0VertexInput.offloadGet.archivedState.isVirtual
+      else io.rightL0VertexInput.offloadGet.archivedState.isVirtual
     } else {
-      throw new Exception("cannot find the conditioned vertex")
+      io.leftVertexInput.offloadGet.state.isVirtual // fallback for non-elastic
     }
   } else {
     False
   }
 
-  val leftGrownOffloadLayers = io.leftVertexInput.offloadGet.archivedState.grown
-  val rightGrownOffloadLayers = io.rightVertexInput.offloadGet.archivedState.grown
+  val leftGrownOffloadLayers =
+    if (config.vertexHasElasticLayers(io.leftL0Vertex)) io.leftL0VertexInput.offloadGet.archivedState.grown
+    else io.leftVertexInput.offloadGet.state.grown
+  val rightGrownOffloadLayers =
+    if (config.vertexHasElasticLayers(io.rightL0Vertex)) io.rightL0VertexInput.offloadGet.archivedState.grown
+    else io.rightVertexInput.offloadGet.state.grown
 
   val offload2WeightArch = UInt(config.weightBits bits)
   offload2WeightArch := stages.offloadGet.state.weight
@@ -196,19 +200,23 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
 
   val conditionedVertexIsVirtualExecuteArch = if (hasLayerFusion) {
     val conditionedVertex = config.edgeConditionedVertex(edgeIndex)
-    if (conditionedVertex == leftVertex) {
-      io.leftVertexInput.executeGet2.archivedState.isVirtual
-    } else if (conditionedVertex == rightVertex) {
-      io.rightVertexInput.executeGet2.archivedState.isVirtual
+    val condL0 = config.layer0CounterpartOf(conditionedVertex)
+    if (config.vertexHasElasticLayers(condL0)) {
+      if (conditionedVertex == leftVertex) io.leftL0VertexInput.executeGet2.archivedState.isVirtual
+      else io.rightL0VertexInput.executeGet2.archivedState.isVirtual
     } else {
-      throw new Exception("cannot find the conditioned vertex")
+      io.leftVertexInput.executeGet2.state.isVirtual
     }
   } else {
     False
   }
 
-  val leftGrownExecuteLayers = io.leftVertexInput.executeGet2.archivedState.grown
-  val rightGrownExecuteLayers = io.rightVertexInput.executeGet2.archivedState.grown
+  val leftGrownExecuteLayers =
+    if (config.vertexHasElasticLayers(io.leftL0Vertex)) io.leftL0VertexInput.executeGet2.archivedState.grown
+    else io.leftVertexInput.executeGet2.state.grown
+  val rightGrownExecuteLayers =
+    if (config.vertexHasElasticLayers(io.rightL0Vertex)) io.rightL0VertexInput.executeGet2.archivedState.grown
+    else io.rightVertexInput.executeGet2.state.grown
 
   val executeWeightArch = UInt(config.weightBits bits)
   executeWeightArch := stages.executeGet2.state.weight
@@ -242,8 +250,12 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
 
   stages.updateSet.connect(stages.executeGet3)
 
-  val leftGrownUpdateLayers = io.leftVertexInput.executeGet3.archivedState.grown
-  val rightGrownUpdateLayers = io.rightVertexInput.executeGet3.archivedState.grown
+  val leftGrownUpdateLayers =
+    if (config.vertexHasElasticLayers(io.leftL0Vertex)) io.leftL0VertexInput.executeGet3.archivedState.grown
+    else io.leftVertexInput.executeGet3.state.grown
+  val rightGrownUpdateLayers =
+    if (config.vertexHasElasticLayers(io.rightL0Vertex)) io.rightL0VertexInput.executeGet3.archivedState.grown
+    else io.rightVertexInput.executeGet3.state.grown
 
   val updateArea = new Area {
     val edgeRemaining = EdgeRemaining(
@@ -281,12 +293,18 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   edgeResponse.io.rightVertex := rightVertex
   edgeResponse.io.remaining := stages.updateGet3.remaining
 
-  // Archived edge response (from scan-driven archivedState pipeline)
+  // Archived edge response (from layer-0 counterpart vertex's archived pipeline)
   val archivedEdgeResponse = EdgeResponse(config.vertexBits, config.weightBits)
-  archivedEdgeResponse.io.leftShadow := io.leftVertexInput.updateGet3.archivedShadow
-  archivedEdgeResponse.io.rightShadow := io.rightVertexInput.updateGet3.archivedShadow
-  archivedEdgeResponse.io.leftIsVirtual := io.leftVertexInput.updateGet3.archivedState.isVirtual
-  archivedEdgeResponse.io.rightIsVirtual := io.rightVertexInput.updateGet3.archivedState.isVirtual
+  val leftL0Elastic = config.vertexHasElasticLayers(io.leftL0Vertex)
+  val rightL0Elastic = config.vertexHasElasticLayers(io.rightL0Vertex)
+  archivedEdgeResponse.io.leftShadow := (if (leftL0Elastic) io.leftL0VertexInput.updateGet3.archivedShadow
+    else io.leftVertexInput.updateGet3.shadow)
+  archivedEdgeResponse.io.rightShadow := (if (rightL0Elastic) io.rightL0VertexInput.updateGet3.archivedShadow
+    else io.rightVertexInput.updateGet3.shadow)
+  archivedEdgeResponse.io.leftIsVirtual := (if (leftL0Elastic) io.leftL0VertexInput.updateGet3.archivedState.isVirtual
+    else io.leftVertexInput.updateGet3.state.isVirtual)
+  archivedEdgeResponse.io.rightIsVirtual := (if (rightL0Elastic) io.rightL0VertexInput.updateGet3.archivedState.isVirtual
+    else io.rightVertexInput.updateGet3.state.isVirtual)
   archivedEdgeResponse.io.leftVertex := leftVertex
   archivedEdgeResponse.io.rightVertex := rightVertex
   archivedEdgeResponse.io.remaining := stages.updateGet3.remainingVsElasticLayers
@@ -406,11 +424,9 @@ class EdgeTest extends AnyFunSuite {
       val edge = Edge(config, 0)
       edge.io.leftVertexInput.assignDontCare()
       edge.io.rightVertexInput.assignDontCare()
+      edge.io.leftL0VertexInput.assignDontCare()
+      edge.io.rightL0VertexInput.assignDontCare()
       edge.io.message.assignDontCare()
-      edge.io.leftScanStateA.assignDontCare()
-      edge.io.leftScanStateB.assignDontCare()
-      edge.io.rightScanStateA.assignDontCare()
-      edge.io.rightScanStateB.assignDontCare()
       edge.io.edgeScanActive := False
       edge.io.edgeScanIndex := U(0, config.archiveAddressBits bits)
     })
@@ -440,11 +456,9 @@ object EdgeEstimation extends App {
       val edge = Edge(config, edgeIndex)
       edge.io.leftVertexInput.assignDontCare()
       edge.io.rightVertexInput.assignDontCare()
+      edge.io.leftL0VertexInput.assignDontCare()
+      edge.io.rightL0VertexInput.assignDontCare()
       edge.io.message.assignDontCare()
-      edge.io.leftScanStateA.assignDontCare()
-      edge.io.leftScanStateB.assignDontCare()
-      edge.io.rightScanStateA.assignDontCare()
-      edge.io.rightScanStateB.assignDontCare()
       edge.io.edgeScanActive := False
       edge.io.edgeScanIndex := U(0, config.archiveAddressBits bits)
     })
