@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn dual_module_looper_streaming_decode() {
         // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_streaming_decode -- --nocapture
-        use micro_blossom_nostd::primal_module_embedded::*;
+        use crate::primal_module_embedded_adaptor::PrimalModuleEmbedded;
         use micro_blossom_nostd::util::*;
 
         let graph_path = format!(
@@ -267,9 +267,11 @@ mod tests {
         .unwrap();
 
         let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
-        let mut dual: DualModuleLooper = DualModuleStackless::new(
-            DualDriverTracked::new(DualModuleLooperDriver::new(graph.clone(), config).unwrap()),
-        );
+        let mut dual: Box<DualModuleLooper> = stacker::grow(MAX_NODE_NUM * 256, || {
+            Box::new(DualModuleStackless::new(
+                DualDriverTracked::new(DualModuleLooperDriver::new(graph.clone(), config).unwrap()),
+            ))
+        });
         let mut primal: Box<PrimalModuleEmbedded<MAX_NODE_NUM>> =
             stacker::grow(MAX_NODE_NUM * 256, || Box::new(PrimalModuleEmbedded::new()));
         primal.nodes.blossom_begin = graph.vertex_num;
@@ -305,13 +307,13 @@ mod tests {
             for layer_id in 0..num_layers {
                 dual.fuse_layer(layer_id as CompactLayerNum);
                 primal.fuse_layer(
-                    &mut dual,
+                    &mut *dual,
                     CompactLayerId::new(layer_id as CompactLayerNum).unwrap(),
                 );
 
                 let (mut obstacle, _) = dual.find_obstacle();
                 while !obstacle.is_none() {
-                    primal.resolve(&mut dual, obstacle);
+                    primal.resolve(&mut *dual, obstacle);
                     (obstacle, _) = dual.find_obstacle();
                 }
             }
@@ -329,12 +331,12 @@ mod tests {
         for layer_id in 0..num_layers {
             dual.fuse_layer(layer_id as CompactLayerNum);
             primal.fuse_layer(
-                &mut dual,
+                &mut *dual,
                 CompactLayerId::new(layer_id as CompactLayerNum).unwrap(),
             );
             let (mut obstacle, _) = dual.find_obstacle();
             while !obstacle.is_none() {
-                primal.resolve(&mut dual, obstacle);
+                primal.resolve(&mut *dual, obstacle);
                 (obstacle, _) = dual.find_obstacle();
             }
         }
