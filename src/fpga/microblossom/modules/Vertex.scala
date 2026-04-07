@@ -73,6 +73,13 @@ case class Vertex(
     val shiftSource = out(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)))
     /// Donor live state, wired in `DistributedDual` when this vertex shifts from a higher layer.
     val shiftDonorLive = in(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)))
+    /** Central write address for ArchiveElasticSlice. */
+    val archiveWriteAddr = in UInt (config.archiveAddressBits bits)
+    /** Edge scan: index into archivedRegs for pipeline input. */
+    val scanIndex = in UInt (config.archiveAddressBits bits)
+    /** Scan writeback: the scan index that just exited the pipeline, and enable. */
+    val scanWritebackIndex = in UInt (config.archiveAddressBits bits)
+    val scanWritebackEn = in(Bool())
     // final outputs
     val maxGrowable = out(ConvergecastMaxGrowable(config.weightBits))
   }
@@ -88,8 +95,7 @@ case class Vertex(
   var fetchState = VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))
   var message = BroadcastMessage(config)
 
-  // One archived snapshot per context (written only on ArchiveElasticSlice).
-  val elasticLayersDepth = if (elastic) config.contextDepth else 1
+  val elasticLayersDepth = if (elastic) config.archiveDepth else 1
 
   // Fetch: always from ram (context switching) or register (single context). Elastic does not read from layers.
   if (config.contextBits > 0) {
@@ -110,6 +116,17 @@ case class Vertex(
     layers.setTechnology(ramBlock)
   }
 
+  // Register file holding all archived vertex states. Padded to at least 2 for address bit alignment.
+  val archivedRegsDepth = config.archiveDepth max 2
+  val archivedRegs =
+    if (elastic) Vec.fill(archivedRegsDepth)(Reg(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex))))
+    else null
+  if (elastic) {
+    for (i <- 0 until archivedRegsDepth) {
+      archivedRegs(i).init(VertexState.resetValue(config, vertexIndex))
+    }
+  }
+
   // Simulation-only debug read port for `layers` BRAM.
   val layersDebugAddr = if (elastic) UInt(log2Up(elasticLayersDepth) max 1 bits) else null
   val layersDebugData = if (elastic) VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)) else null
@@ -117,8 +134,19 @@ case class Vertex(
     layersDebugData := layers.readAsync(layersDebugAddr)
   }
 
+  val resetVertexState = VertexState.resetValue(config, vertexIndex)
+
+  // Capture only state-modifying instructions for archived execute (constant during scan).
+  val capturedMessage = Reg(BroadcastMessage(config))
+  when(message.valid && message.instruction.needsArchivedScan()) {
+    capturedMessage := message
+  }
+
   stages.offloadSet.message := message
-  stages.offloadSet.state := Mux(message.isReset, VertexState.resetValue(config, vertexIndex), fetchState)
+  stages.offloadSet.state := Mux(message.isReset, resetVertexState, fetchState)
+  if (elastic) {
+    stages.offloadSet.archivedState := archivedRegs(io.scanIndex)
+  }
 
   stages.offloadSet2.connect(stages.offloadGet)
 
@@ -128,7 +156,8 @@ case class Vertex(
       numEdges = config.numIncidentEdgeOf(vertexIndex)
     )
     for (localIndex <- 0 until config.numIncidentEdgeOf(vertexIndex)) {
-      tightCounter.io.tights(localIndex) := io.edgeInputs(localIndex).offloadGet2.isTightExFusion
+      tightCounter.io.tights(localIndex) :=
+        io.edgeInputs(localIndex).offloadGet2.isTightExFusion
     }
     stages.offloadSet3.isUniqueTight := tightCounter.io.isUnique
     stages.offloadSet3.isIsolated := tightCounter.io.isIsolated
@@ -158,6 +187,22 @@ case class Vertex(
     vertexPostExecuteState.io.message := stages.executeGet.message
     vertexPostExecuteState.io.isStalled := stages.executeGet.isStalled
     stages.executeSet2.state := vertexPostExecuteState.io.after
+
+    if (elastic) {
+      // Apply captured instruction to archived state
+      var archivedPostExecute = VertexPostExecuteState(
+        config = config,
+        vertexIndex = vertexIndex
+      )
+      archivedPostExecute.io.before := stages.executeGet.archivedState
+      archivedPostExecute.io.message := capturedMessage
+      if (config.vertexLayerId.contains(vertexIndex)) {
+        archivedPostExecute.io.isStalled := stages.executeGet.archivedState.isVirtual
+      } else {
+        archivedPostExecute.io.isStalled := False
+      }
+      stages.executeSet2.archivedState := archivedPostExecute.io.after
+    }
   }
 
   stages.executeSet3.connect(stages.executeGet2)
@@ -170,31 +215,70 @@ case class Vertex(
     )
     vertexPropagatingPeer.io.grown := stages.executeGet3.state.grown
     for (localIndex <- 0 until config.numIncidentEdgeOf(vertexIndex)) {
-      vertexPropagatingPeer.io.edgeIsTight(localIndex) := io.edgeInputs(localIndex).executeGet3.isTight
+      vertexPropagatingPeer.io.edgeIsTight(localIndex) :=
+        io.edgeInputs(localIndex).executeGet3.isTight
       vertexPropagatingPeer.io.peerSpeed(localIndex) := io.peerVertexInputsExecute3(localIndex).state.speed
       vertexPropagatingPeer.io.peerNode(localIndex) := io.peerVertexInputsExecute3(localIndex).state.node
       vertexPropagatingPeer.io.peerRoot(localIndex) := io.peerVertexInputsExecute3(localIndex).state.root
     }
     stages.updateSet.propagatingPeer := vertexPropagatingPeer.io.peer
+
+    if (elastic) {
+      // Archived peer propagation: same logic but from archivedState + archived tight signals.
+      // Only peers that are also elastic have archivedState; others use reset defaults.
+      var archivedPropagatingPeer = VertexPropagatingPeer(
+        config = config,
+        vertexIndex = vertexIndex
+      )
+      archivedPropagatingPeer.io.grown := stages.executeGet3.archivedState.grown
+      for ((edgeIndex, localIndex) <- config.incidentEdgesOf(vertexIndex).zipWithIndex) {
+        val peerVi = config.peerVertexOfEdge(edgeIndex, vertexIndex)
+        val peerElastic = config.vertexHasElasticLayers(peerVi)
+        archivedPropagatingPeer.io.edgeIsTight(localIndex) :=
+          io.edgeInputs(localIndex).executeGet3.isTightVsElasticLayers
+        if (peerElastic) {
+          archivedPropagatingPeer.io.peerSpeed(localIndex) := io.peerVertexInputsExecute3(localIndex).archivedState.speed
+          archivedPropagatingPeer.io.peerNode(localIndex) := io.peerVertexInputsExecute3(localIndex).archivedState.node
+          archivedPropagatingPeer.io.peerRoot(localIndex) := io.peerVertexInputsExecute3(localIndex).archivedState.root
+        } else {
+          archivedPropagatingPeer.io.peerSpeed(localIndex) := Speed.Stay
+          archivedPropagatingPeer.io.peerNode(localIndex) := B(config.IndexNone, config.vertexBits bits)
+          archivedPropagatingPeer.io.peerRoot(localIndex) := B(config.IndexNone, config.vertexBits bits)
+        }
+      }
+      stages.updateSet.archivedPropagatingPeer := archivedPropagatingPeer.io.peer
+    }
   }
 
   stages.updateSet2.connect(stages.updateGet)
   var update2Area = new Area {
+    // Live post-update
     var vertexPostUpdateState = VertexPostUpdateState(
       config = config,
       vertexIndex = vertexIndex
     )
     vertexPostUpdateState.io.before := stages.updateGet.state
     vertexPostUpdateState.io.propagator := stages.updateGet.propagatingPeer
-    // do not update vertex's data while shifting is happening
     vertexPostUpdateState.io.holdForArchive :=
       stages.updateGet.compact.valid && stages.updateGet.compact.isArchiveElasticSlice
     stages.updateSet2.state := vertexPostUpdateState.io.after
 
+    if (elastic) {
+      // Archived post-update
+      var archivedPostUpdateState = VertexPostUpdateState(
+        config = config,
+        vertexIndex = vertexIndex
+      )
+      archivedPostUpdateState.io.before := stages.updateGet.archivedState
+      archivedPostUpdateState.io.propagator := stages.updateGet.archivedPropagatingPeer
+      archivedPostUpdateState.io.holdForArchive := False
+      stages.updateSet2.archivedState := archivedPostUpdateState.io.after
+    }
   }
 
   stages.updateSet3.connect(stages.updateGet2)
   var update3Area = new Area {
+    // Live shadow
     var vertexShadow = VertexShadow(
       config = config,
       vertexIndex = vertexIndex
@@ -207,14 +291,38 @@ case class Vertex(
     vertexShadow.io.isStalled := stages.updateGet2.isStalled
     vertexShadow.io.propagator := stages.updateGet2.propagatingPeer
     stages.updateSet3.shadow := vertexShadow.io.shadow
+
+    if (elastic) {
+      // Archived shadow
+      var archivedVertexShadow = VertexShadow(
+        config = config,
+        vertexIndex = vertexIndex
+      )
+      archivedVertexShadow.io.isVirtual := stages.updateGet2.archivedState.isVirtual
+      archivedVertexShadow.io.node := stages.updateGet2.archivedState.node
+      archivedVertexShadow.io.root := stages.updateGet2.archivedState.root
+      archivedVertexShadow.io.speed := stages.updateGet2.archivedState.speed
+      archivedVertexShadow.io.grown := stages.updateGet2.archivedState.grown
+      archivedVertexShadow.io.isStalled := False
+      archivedVertexShadow.io.propagator := stages.updateGet2.archivedPropagatingPeer
+      stages.updateSet3.archivedShadow := archivedVertexShadow.io.shadow
+    }
   }
 
   val vertexResponse = VertexResponse(config, vertexIndex)
   vertexResponse.io.state := stages.updateGet3.state
 
+  // Capture live vertex maxGrowable when the actual instruction exits (compact.valid).
+  // During scan cycles compact.valid is false, so the register holds the real result.
+  val liveVertexMaxGrowable = Reg(ConvergecastMaxGrowable(config.weightBits))
+  liveVertexMaxGrowable.length.init(liveVertexMaxGrowable.length.maxValue)
+  when(stages.updateGet3.compact.valid) {
+    liveVertexMaxGrowable := vertexResponse.io.maxGrowable
+  }
+
   // 1 cycle delay when context is used (to ensure read latency >= execute latency)
   val outDelay = (config.contextDepth != 1).toInt
-  io.maxGrowable := Delay(vertexResponse.io.maxGrowable, outDelay)
+  io.maxGrowable := Delay(liveVertexMaxGrowable, outDelay)
 
   // shift logic for both ram & register storage
   val writeState = stages.updateGet3.state
@@ -255,11 +363,18 @@ case class Vertex(
       enable = memWriteEnable || shiftWriteEnable
     )
     if (elastic) {
-      layers.write(
-        address = compact.contextId.resize(log2Up(elasticLayersDepth)),
-        data = rs,
-        enable = commitArchive
-      )
+      val mAddrW = log2Up(elasticLayersDepth) max 1
+      // Writeback from pipeline: archivedState exits at updateGet3, write to regs + BRAM.
+      val wbData = stages.updateGet3.archivedState
+      val wbAddr = io.scanWritebackIndex.resize(mAddrW)
+      when(io.scanWritebackEn) {
+        archivedRegs(wbAddr) := wbData
+        layers.write(address = wbAddr, data = wbData, enable = True)
+      } elsewhen(commitArchive) {
+        // ArchiveElasticSlice: snapshot pre-shift state into archive
+        layers.write(address = io.archiveWriteAddr.resize(mAddrW), data = rs, enable = True)
+        archivedRegs(io.archiveWriteAddr) := rs
+      }
     }
   } else {
     io.shiftSource := register
@@ -286,11 +401,18 @@ case class Vertex(
       }
     }
     if (elastic) {
-      layers.write(
-        address = U(0, log2Up(elasticLayersDepth) bits),
-        data = register,
-        enable = commitArchive
-      )
+      val mAddrW = log2Up(elasticLayersDepth) max 1
+      // Writeback from pipeline: archivedState exits at updateGet3, write to regs + BRAM.
+      val wbData = stages.updateGet3.archivedState
+      val wbAddr = io.scanWritebackIndex.resize(mAddrW)
+      when(io.scanWritebackEn) {
+        archivedRegs(wbAddr) := wbData
+        layers.write(address = wbAddr, data = wbData, enable = True)
+      } elsewhen(commitArchive) {
+        // ArchiveElasticSlice: snapshot pre-shift state into archive
+        layers.write(address = io.archiveWriteAddr.resize(mAddrW), data = register, enable = True)
+        archivedRegs(io.archiveWriteAddr) := register
+      }
     }
   }
   // debugging etc purposes
@@ -309,6 +431,21 @@ case class Vertex(
   }
   stages.finish()
 
+
+}
+
+/** Wires dormant mirror-archive ports for standalone `Vertex` elaboration (e.g. Verilog export). */
+case class VertexElaborationStub(
+    config: DualConfig,
+    vertexIndex: Int,
+    elastic: Boolean = false,
+    tieShiftDonorToSelf: Boolean = true
+) extends Component {
+  val inner = Vertex(config, vertexIndex, elastic, tieShiftDonorToSelf)
+  inner.io.archiveWriteAddr := U(0, config.archiveAddressBits bits)
+  inner.io.scanIndex := U(0, config.archiveAddressBits bits)
+  inner.io.scanWritebackIndex := U(0, config.archiveAddressBits bits)
+  inner.io.scanWritebackEn := False
 }
 
 // sbt 'testOnly microblossom.modules.VertexTest'
@@ -319,7 +456,7 @@ class VertexTest extends AnyFunSuite {
     // config.contextDepth = 1024 // fit in a single Block RAM of 36 kbits in 36-bit mode
     config.contextDepth = 1 // no context switch
     config.sanityCheck()
-    Config.spinal().generateVerilog(Vertex(config, 0))
+    Config.spinal().generateVerilog(VertexElaborationStub(config, 0))
   }
 
 }
@@ -342,7 +479,7 @@ object VertexEstimation extends App {
     (dualConfig("circuit_level_d11"), 845, "circuit-level 12 neighbors (d=11)")
   )
   for ((config, vertexIndex, name) <- configurations) {
-    val reports = Vivado.report(Vertex(config, vertexIndex))
+    val reports = Vivado.report(VertexElaborationStub(config, vertexIndex))
     println(s"$name:")
     reports.resource.primitivesTable.print()
   }
