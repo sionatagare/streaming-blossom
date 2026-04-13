@@ -70,6 +70,13 @@ impl<const N: usize> BlossomTracker<N> {
         self.hit_zero_events.clear();
         self.checkpoints.clear();
         self.grow_states.clear();
+        // Match `new()`: after clear there are no tracked blossoms until the next
+        // `create_blossom`. Stale `first_index` would otherwise pair with `len == 0` and make
+        // `[first_index, first_index + len)` nonsensical (e.g. `[32, 32)`).
+        self.first_index = match CompactNodeIndex::new(0).option() {
+            Some(index) => index,
+            None => unreachable!(),
+        };
     }
 
     #[inline(always)]
@@ -119,6 +126,14 @@ impl<const N: usize> BlossomTracker<N> {
     }
 
     pub fn set_speed(&mut self, node_index: CompactNodeIndex, grow_state: CompactGrowState) {
+        // After `clear()` (e.g. on `ArchiveElasticSlice`), the dual may still emit `set_speed` for
+        // blossom indices that existed before the archive until the next `create_blossom`
+        // repopulates this tracker. Those updates are not tracked here (hardware handles archived
+        // shrinking per `DualDriverTracked::archive_elastic_slice`); ignore them until we have
+        // at least one blossom again.
+        if self.checkpoints.is_empty() {
+            return;
+        }
         let local_index = self.local_index_of(node_index);
         // update checkpoint timestamp to the current timestamp and update its dual value accordingly
         if &grow_state == get!(self.grow_states, local_index) {
@@ -279,5 +294,21 @@ mod tests {
         tracker.advance_time(30);
         tracker.set_speed(node_2, CompactGrowState::Shrink);
         assert_eq!(tracker.get_maximum_growth(), Some((60, node_2)));
+    }
+
+    /// Mirrors `DualDriverTracked::archive_elastic_slice`: clear tracker, then dual may still
+    /// call `set_speed` for the same blossom index before `create_blossom` runs again.
+    #[test]
+    fn blossom_tracker_clear_then_set_speed_before_recreate() {
+        let mut tracker = BlossomTracker::<4>::new();
+        let b = ni!(32);
+        tracker.create_blossom(b);
+        tracker.set_speed(b, CompactGrowState::Shrink);
+        tracker.clear();
+        // Must not panic (previously: stale first_index + empty checkpoints → `[32, 32)`).
+        tracker.set_speed(b, CompactGrowState::Stay);
+        tracker.create_blossom(b);
+        tracker.set_speed(b, CompactGrowState::Grow);
+        assert_eq!(tracker.get_dual_variable(b), 0);
     }
 }

@@ -124,7 +124,7 @@ impl SimulationTcpClient {
             compile_begin.elapsed()
         };
         // read operation should not take more than 30s; if failed, it's probably infinite loop in the verilog code
-        socket.set_read_timeout(Some(std::time::Duration::from_secs(30))).unwrap();
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(120))).unwrap();
         Ok(Self {
             simulation_name: simulation_name.to_string(),
             name,

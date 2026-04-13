@@ -80,8 +80,17 @@ impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualStacklessDr
 
     fn archive_elastic_slice(&mut self) {
         self.driver.archive_elastic_slice();
-        // Clear blossom tracker: the archive shifts all dual variables in hardware,
-        // so any tracked blossom state is now stale.
+        // Clear blossom tracker: the archive shifts all layer fusion vertex dual variables
+        // in hardware, invalidating the software tracker's blossom checkpoints.
+        //
+        // After clearing, archived blossom shrinking is detected purely by the hardware scan
+        // pipeline (archivedEdgeResponse reports remaining=0 as a conflict). The software
+        // blossom tracker does NOT track archived blossoms — only live ones.
+        //
+        // This means: if an archived blossom shrinks, the hardware detects it via the scan
+        // and reports it as a conflict in the convergecast. The primal module then resolves
+        // it (e.g., expand the blossom). The hardware clamps grown to 0 on underflow
+        // (VertexPostExecuteState), so no UInt wrap-around occurs.
         self.blossom_tracker.clear();
     }
 }

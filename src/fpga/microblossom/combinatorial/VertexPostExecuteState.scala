@@ -41,7 +41,13 @@ object VertexPostExecuteStateCommon {
               after.grown := before.grown + instruction.length.resized
             }
             is(Speed.Shrink) {
-              after.grown := before.grown - instruction.length.resized
+              // Clamp to 0 on underflow to prevent UInt wrap-around
+              val shrinkAmount = instruction.length.resize(before.grown.getWidth)
+              when(before.grown >= shrinkAmount) {
+                after.grown := before.grown - shrinkAmount
+              } otherwise {
+                after.grown := 0
+              }
             }
           }
         }

@@ -75,6 +75,8 @@ case class Vertex(
     val shiftDonorLive = in(VertexState(config.vertexBits, config.grownBitsOf(vertexIndex)))
     /** Central write address for ArchiveElasticSlice. */
     val archiveWriteAddr = in UInt (config.archiveAddressBits bits)
+    /** True when data has shifted to layer 0 and should be committed to archive. */
+    val archiveCommitEn = in(Bool())
     /** Edge scan: index into archivedRegs for pipeline input. */
     val scanIndex = in UInt (config.archiveAddressBits bits)
     /** Scan writeback: the scan index that just exited the pipeline, and enable. */
@@ -370,8 +372,8 @@ case class Vertex(
       when(io.scanWritebackEn) {
         archivedRegs(wbAddr) := wbData
         layers.write(address = wbAddr, data = wbData, enable = True)
-      } elsewhen(commitArchive) {
-        // ArchiveElasticSlice: snapshot pre-shift state into archive
+      } elsewhen(commitArchive && io.archiveCommitEn) {
+        // ArchiveElasticSlice: snapshot pre-shift state into archive (only after warmup)
         layers.write(address = io.archiveWriteAddr.resize(mAddrW), data = rs, enable = True)
         archivedRegs(io.archiveWriteAddr) := rs
       }
@@ -408,8 +410,8 @@ case class Vertex(
       when(io.scanWritebackEn) {
         archivedRegs(wbAddr) := wbData
         layers.write(address = wbAddr, data = wbData, enable = True)
-      } elsewhen(commitArchive) {
-        // ArchiveElasticSlice: snapshot pre-shift state into archive
+      } elsewhen(commitArchive && io.archiveCommitEn) {
+        // ArchiveElasticSlice: snapshot pre-shift state into archive (only after warmup)
         layers.write(address = io.archiveWriteAddr.resize(mAddrW), data = register, enable = True)
         archivedRegs(io.archiveWriteAddr) := register
       }
@@ -443,6 +445,7 @@ case class VertexElaborationStub(
 ) extends Component {
   val inner = Vertex(config, vertexIndex, elastic, tieShiftDonorToSelf)
   inner.io.archiveWriteAddr := U(0, config.archiveAddressBits bits)
+  inner.io.archiveCommitEn := False
   inner.io.scanIndex := U(0, config.archiveAddressBits bits)
   inner.io.scanWritebackIndex := U(0, config.archiveAddressBits bits)
   inner.io.scanWritebackEn := False

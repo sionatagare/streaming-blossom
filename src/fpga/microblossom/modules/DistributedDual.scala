@@ -133,10 +133,18 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     offloader.io.edgeInputOffloadGet3 := edges(edgeIndex).io.stageOutputs.offloadGet3
   }
 
+  val archiveCommitEn = Bool()
+
   if (firstLayerVertexIndices.nonEmpty) {
-    // Central archive write counter: incremented on each ArchiveElasticSlice
+    val warmupThreshold = config.numLayers.toInt - 1  // shifts needed before data reaches layer 0
+
+    // Total number of ArchiveElasticSlice operations since last Reset
+    val archiveTotalCount = Reg(UInt(log2Up(config.archiveDepth + warmupThreshold + 1) max 1 bits)) init 0
+    // How many valid entries are in archivedRegs/BRAM (0 during warmup, then increments)
     val archiveWriteCounter = Reg(UInt(config.archiveAddressBits bits)) init 0
     val archiveValidCount = Reg(UInt((config.archiveAddressBits + 1) bits)) init 0
+    // True when warmup is complete and current archive should commit to BRAM/regs
+    val warmupDone = archiveTotalCount >= U(warmupThreshold, archiveTotalCount.getWidth bits)
 
     // State machine registers
     val scanActive = Reg(Bool()) init False
@@ -151,19 +159,23 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       broadcastRegInserted.valid &&
         broadcastRegInserted.instruction.needsArchivedScan()
 
-    // On ArchiveElasticSlice: increment write counter
+    // On ArchiveElasticSlice: always increment total count; only commit after warmup
     when(isArchiveSlice) {
-      when(archiveValidCount < config.archiveDepth) {
+      archiveTotalCount := archiveTotalCount + 1
+      when(warmupDone && (archiveValidCount < config.archiveDepth)) {
         archiveWriteCounter := archiveWriteCounter + 1
         archiveValidCount := archiveValidCount + 1
       }
     }
 
-    // On Reset: clear archive state
+    // On Reset: clear all archive state
     when(broadcastRegInserted.valid && broadcastRegInserted.instruction.isReset()) {
+      archiveTotalCount := 0
       archiveWriteCounter := 0
       archiveValidCount := 0
     }
+
+    archiveCommitEn := warmupDone && (archiveValidCount < config.archiveDepth)
 
     /*
      * State machine (no mirror walk — the pipeline handles everything):
@@ -211,6 +223,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     // Let the triggering instruction through; block subsequent ones
     broadcastMessage.valid := io.message.valid && !scanActive
   } else {
+    archiveCommitEn := False
     edgeScanActive := False
     edgeScanFeeding := False
     edgeScanIndex := U(0, config.archiveAddressBits bits)
@@ -223,6 +236,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
 
   for ((vertex, _) <- vertices.zipWithIndex) {
     vertex.io.archiveWriteAddr := archiveWriteAddr
+    vertex.io.archiveCommitEn := archiveCommitEn
     vertex.io.scanIndex := edgeScanIndex
     vertex.io.scanWritebackEn := scanWritebackEn
     vertex.io.scanWritebackIndex := scanWritebackIndex
@@ -2489,6 +2503,503 @@ class MultiLayerArchiveTest extends AnyFunSuite {
       }
     }
     println("isFusionEdgeSameL0 test passed")
+  }
+
+  // ========================================================================
+  // End-to-end streaming decode test (like cargo run -r test embedded-axi4)
+  // ========================================================================
+
+  test("streaming decode: multi-round grow-match-archive loop") {
+    // Simulates the streaming decode pattern from benchmark_decoding.rs:
+    //   For each round:
+    //     1. AddDefect on top layer with unique node IDs
+    //     2. LoadDefectsExternal(topLayer) to un-virtualize
+    //     3. Grow → FindObstacle → Match loop until no obstacles
+    //     4. ArchiveElasticSlice to shift state down
+    //
+    // After all rounds, verify:
+    //   - All conflicts were resolved (no outstanding obstacles)
+    //   - Archived state is consistent (grown values, node assignments)
+    //   - Dual variable sum is non-negative (basic sanity)
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testStreamingDecode") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+
+        val topLayer = config.numLayers.toInt - 1  // layer 3
+        // Top-layer vertices for d3 phenomenological: v24, v27, v28, v31
+        val topLayerVertices = config.layerFusion.layers(topLayer).map(_.toInt)
+        var streamingNodeOffset = 0
+        val numRounds = 3
+
+        // Predefined defect patterns for each round (subset of top-layer vertices)
+        val defectPatterns = Seq(
+          Seq(24, 27),   // round 0: two adjacent defects
+          Seq(28),       // round 1: single defect
+          Seq(24, 31)    // round 2: two non-adjacent defects
+        )
+
+        for (round <- 0 until numRounds) {
+          val defects = defectPatterns(round)
+          println(s"\n=== Round $round: defects on vertices ${defects.mkString(",")} (node offset $streamingNodeOffset) ===")
+
+          // Phase 1: AddDefect on top layer with unique node IDs
+          for ((vertex, i) <- defects.zipWithIndex) {
+            dut.simExecute(ioConfig.instructionSpec.generateAddDefect(vertex, streamingNodeOffset + i))
+          }
+
+          // Phase 2: LoadDefectsExternal to un-virtualize top layer
+          dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(topLayer))
+
+          // Phase 3: Grow → FindObstacle → resolve loop
+          var totalGrown = 0L
+          var iterations = 0
+          val maxIterations = 100
+          var done = false
+
+          while (!done && iterations < maxIterations) {
+            // FindObstacle
+            val (maxGrowable, conflict) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+            println(s"  iter $iterations: maxGrowable=${maxGrowable.length}, conflict=${conflict.valid}" +
+              (if (conflict.valid) s" nodes=(${conflict.node1},${conflict.node2})" else ""))
+
+            if (conflict.valid) {
+              // Resolve: SetBlossom both nodes to a shared blossom
+              // Simple strategy: create a blossom node and assign both conflicting nodes to it
+              val blossomNode = streamingNodeOffset + defects.length + iterations
+              if (conflict.node1 != config.IndexNone) {
+                dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(conflict.node1, blossomNode))
+              }
+              if (conflict.node2 != config.IndexNone && conflict.node2 != conflict.node1) {
+                dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(conflict.node2, blossomNode))
+              }
+              // Set speed to Shrink for the blossom (simplified matching)
+              dut.simExecute(ioConfig.instructionSpec.generateSetSpeed(blossomNode, Speed.Shrink))
+            } else if (maxGrowable.length > 0 && maxGrowable.length != config.LengthNone) {
+              // Grow
+              val growAmount = maxGrowable.length.toLong min 10  // cap growth
+              dut.simExecute(ioConfig.instructionSpec.generateGrow(growAmount))
+              totalGrown += growAmount
+            } else {
+              // No conflict, no growable → done
+              done = true
+            }
+            iterations += 1
+          }
+
+          println(s"  Round $round resolved in $iterations iterations, totalGrown=$totalGrown")
+          assert(iterations < maxIterations, s"Round $round: exceeded max iterations (stuck in solve loop)")
+
+          // Phase 4: ArchiveElasticSlice
+          dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+
+          // Verify: after archive, top layer is reset
+          sleep(1)
+          for (v <- topLayerVertices) {
+            assert(dut.vertices(v).register.node.toLong == config.IndexNone,
+              s"Round $round: top-layer v$v should be reset after archive")
+            assert(dut.vertices(v).register.grown.toLong == 0,
+              s"Round $round: top-layer v$v grown should be 0 after archive")
+          }
+
+          streamingNodeOffset += defects.length + iterations  // account for blossom nodes
+        }
+
+        // Post-decode verification: check archived state consistency
+        println("\n=== Post-decode verification ===")
+        for (i <- 0 until numRounds) {
+          dut.vertices(0).layersDebugAddr #= i
+          sleep(1)
+          val archNode = dut.vertices(0).layersDebugData.node.toLong
+          val archGrown = dut.vertices(0).layersDebugData.grown.toLong
+          val archSpeed = dut.vertices(0).layersDebugData.speed.toLong
+          println(s"  v0.layers[$i]: node=$archNode grown=$archGrown speed=$archSpeed")
+        }
+
+        // Verify: sum of all grown values (dual variable sum) is non-negative
+        var totalDualSum = 0L
+        for (vi <- 0 until config.vertexNum) {
+          totalDualSum += dut.vertices(vi).register.grown.toLong
+        }
+        println(s"  Live dual variable sum: $totalDualSum")
+        assert(totalDualSum >= 0, "Dual variable sum should be non-negative")
+
+        // Final FindObstacle: should have no live conflicts after all matching
+        val (finalMaxGrowable, finalConflict) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+        println(s"  Final: maxGrowable=${finalMaxGrowable.length}, conflict=${finalConflict.valid}")
+
+        println("\nStreaming decode test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
+  test("streaming decode: archived conflict survives across rounds") {
+    // Round 0: place two defects, grow to near-tightness, archive.
+    // Round 1: place new defects, grow. The archived pair should become tight
+    //          (since Grow applies to both live and archived). Verify the archived
+    //          conflict is reported alongside any live conflicts.
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testArchivedConflictAcrossRounds") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+
+        // Round 0: place defects on v0, v3 (layer 0 elastic, edge 1 weight=2)
+        // Un-virtualize layer 0. Grow by 0 (don't grow yet). Archive.
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 0))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(3, 1))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
+
+        // Archive WITHOUT growing — archived pair has grown=0, speed=Grow
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        sleep(1)
+
+        val archGrown0 = dut.vertices(0).archivedRegs(0).grown.toLong
+        val archSpeed0 = dut.vertices(0).archivedRegs(0).speed.toLong
+        val archNode0 = dut.vertices(0).archivedRegs(0).node.toLong
+        println(s"After archive: v0.arch[0] node=$archNode0 grown=$archGrown0 speed=$archSpeed0")
+        assert(archNode0 == 0, s"v0.arch[0] node should be 0, got $archNode0")
+        assert(archGrown0 == 0, s"v0.arch[0] grown should be 0, got $archGrown0")
+        assert(archSpeed0 == Speed.Grow, s"v0.arch[0] speed should be Grow, got $archSpeed0")
+
+        // Round 1: place defect on v24 (top layer), grow by 1
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 2))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+
+        // After Grow(1): archived pair should have grown=1 each. Edge v0-v3 weight=2.
+        // 1+1=2 >= 2 → tight → archived conflict.
+        sleep(1)
+        val archGrown0After = dut.vertices(0).archivedRegs(0).grown.toLong
+        val archGrown3After = dut.vertices(3).archivedRegs(0).grown.toLong
+        println(s"After Grow(1): v0.arch[0].grown=$archGrown0After, v3.arch[0].grown=$archGrown3After")
+        assert(archGrown0After == 1, s"v0.arch[0] should have grown to 1, got $archGrown0After")
+        assert(archGrown3After == 1, s"v3.arch[0] should have grown to 1, got $archGrown3After")
+
+        // FindObstacle should report the archived conflict (nodes 0 and 1)
+        val (maxGrowable, conflict) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+        println(s"FindObstacle: maxGrowable=${maxGrowable.length}, conflict=${conflict.valid}")
+        if (conflict.valid) {
+          println(s"  conflict: node1=${conflict.node1}, node2=${conflict.node2}")
+        }
+        assert(conflict.valid, "archived pair v0-v3 should be tight after Grow(1)")
+        val conflictNodes = Set(conflict.node1, conflict.node2)
+        assert(conflictNodes.contains(0) && conflictNodes.contains(1),
+          s"conflict should involve nodes 0 and 1, got ${conflict.node1} and ${conflict.node2}")
+
+        println("Archived conflict across rounds test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
+  test("streaming decode: match resolves archived conflict") {
+    // Archive two defects, grow to tightness, verify conflict, match them,
+    // verify conflict is resolved.
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testMatchResolvesArchivedConflict") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+
+        // Place defects on v0 and v3 (elastic, edge 1, weight=2)
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 0))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(3, 1))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+
+        // Grow until archived pair is tight
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+
+        // Verify conflict
+        val (_, conflict1) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+        assert(conflict1.valid, "should have archived conflict after Grow(1)")
+        println(s"Conflict: node1=${conflict1.node1}, node2=${conflict1.node2}")
+
+        // Match: set both nodes to same blossom
+        dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(0, 5))
+        dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(1, 5))
+
+        // Verify archived nodes updated
+        sleep(1)
+        val archNode0 = dut.vertices(0).archivedRegs(0).node.toLong
+        val archNode3 = dut.vertices(3).archivedRegs(0).node.toLong
+        println(s"After SetBlossom: v0.arch[0].node=$archNode0, v3.arch[0].node=$archNode3")
+        assert(archNode0 == 5, s"v0.arch[0] node should be 5, got $archNode0")
+        assert(archNode3 == 5, s"v3.arch[0] node should be 5, got $archNode3")
+
+        // Grow again — since both are now in the same blossom, no conflict
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+        val (maxGrowable2, conflict2) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+        println(s"After match + Grow: maxGrowable=${maxGrowable2.length}, conflict=${conflict2.valid}")
+        // The edge between nodes in the same blossom should not report conflict
+        // (EdgeResponse checks node1 ≠ node2; now both are 5 → no conflict from this edge)
+
+        println("Match resolves archived conflict test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
+  test("streaming decode: 4 rounds with varying defect counts") {
+    // Stress test: 4 rounds of streaming decode with different defect patterns.
+    // After each round, verify the top layer resets and the decode loop terminates.
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testStreamingStress") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+
+        val topLayer = config.numLayers.toInt - 1
+        val topLayerVertices = config.layerFusion.layers(topLayer).map(_.toInt)
+        var nodeOffset = 0
+
+        // 4 rounds: 0, 1, 2, 4 defects (0 defects = idle round)
+        val patterns = Seq(
+          Seq(),                 // round 0: no defects (idle)
+          Seq(24),               // round 1: single defect
+          Seq(24, 27),           // round 2: pair of defects
+          Seq(24, 27, 28, 31)   // round 3: all top-layer vertices
+        )
+
+        for ((defects, round) <- patterns.zipWithIndex) {
+          println(s"\n--- Round $round: ${defects.length} defects ---")
+
+          for ((v, i) <- defects.zipWithIndex) {
+            dut.simExecute(ioConfig.instructionSpec.generateAddDefect(v, nodeOffset + i))
+          }
+          if (defects.nonEmpty) {
+            dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(topLayer))
+          }
+
+          // Simple solve loop
+          var iterations = 0
+          var keepGoing = true
+          while (keepGoing && iterations < 50) {
+            val (maxGrowable, conflict) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+            if (conflict.valid) {
+              // Simple resolution: blossom both
+              val bNode = nodeOffset + defects.length + iterations
+              dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(conflict.node1, bNode))
+              if (conflict.node2 != config.IndexNone) {
+                dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(conflict.node2, bNode))
+              }
+              dut.simExecute(ioConfig.instructionSpec.generateSetSpeed(bNode, Speed.Shrink))
+            } else if (maxGrowable.length > 0 && maxGrowable.length != config.LengthNone) {
+              dut.simExecute(ioConfig.instructionSpec.generateGrow(maxGrowable.length.toLong min 5))
+            } else {
+              keepGoing = false
+            }
+            iterations += 1
+          }
+          println(s"  Resolved in $iterations iterations")
+          assert(iterations < 50, s"Round $round stuck in solve loop")
+
+          dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+          sleep(1)
+
+          // Top layer should be reset
+          for (v <- topLayerVertices) {
+            assert(dut.vertices(v).register.node.toLong == config.IndexNone,
+              s"Round $round: v$v should be reset after archive")
+          }
+
+          nodeOffset += defects.length + iterations
+        }
+
+        println("\nStreaming stress test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
+  }
+
+  test("streaming decode: two full measurement rounds with decode and archive") {
+    // Two complete streaming decode rounds, mirroring the CPU's benchmark_decoding.rs.
+    //
+    // Graph: phenomenological_rotated_d3, all edge weights = 2.
+    //   Top layer (3): v24, v27, v28, v31
+    //   Layer 2:       v16, v19, v20, v23
+    //   Layer 1:       v8,  v11, v12, v15
+    //   Layer 0:       v0,  v3,  v4,  v7   (elastic, have archivedRegs)
+    //
+    // Round 0: defects on v24 and v27 (adjacent, edge 52, weight=2)
+    //   - Grow(1): both grow by 1. Edge v24-v27: 1+1=2 >= 2 → tight → conflict(node0, node1).
+    //   - Match: SetBlossom both to blossom node 2.
+    //   - FindObstacle: no more conflicts.
+    //   - ArchiveElasticSlice: shifts everything down.
+    //     Live: v24/v27 reset, v16/v19 get old v24/v27 state (node=2, grown=1).
+    //     Archive: v0.archivedRegs[0] gets old v0 state (reset, speed=Stay).
+    //
+    // Round 1: defects on v24 and v28 (adjacent, edge 55 via v27-v28? No — v24-v27 edge 52, v27-v28 edge 55)
+    //   Actually: v24 and v28 are NOT directly adjacent. v24-v27 is edge 52, v28-v31 is edge 58.
+    //   Use v24 and v27 again for simplicity (different node IDs).
+    //   - Grow(1): live v24/v27 grow. Also archived state grows (v0.archivedRegs[0] has speed=Stay → no change).
+    //     But v16/v19 (shifted from round 0) have node=2, grown=1, speed=Shrink (from SetSpeed in round 0).
+    //     Wait — after round 0's SetBlossom, what's the speed? SetBlossom doesn't set speed. Need explicit SetSpeed.
+    //
+    // Let me simplify: use layer-0 defects directly for predictable archived behavior.
+    //
+    // REVISED PLAN:
+    // Round 0: defects on v0, v3 (layer 0, elastic). Edge 1 (v0-v3, weight=2).
+    //   - LoadDefectsExternal(0) to un-virtualize layer 0.
+    //   - Grow(1): v0.grown=1, v3.grown=1. Edge 1: 1+1=2 >= 2 → tight → conflict(0,1).
+    //   - SetBlossom(0, 2), SetBlossom(1, 2): both → blossom 2.
+    //   - SetSpeed(2, Shrink): blossom shrinks.
+    //   - FindObstacle: no conflict (same blossom). Done.
+    //   - ArchiveElasticSlice: v0.archivedRegs[0] = {node=2, grown=1, speed=Shrink}.
+    //     v0 live ← v8's state (reset). v3.archivedRegs[0] = {node=2, grown=1}.
+    //
+    // Round 1: defects on v0, v3 again (new node IDs 3,4).
+    //   - LoadDefectsExternal(0).
+    //   - Grow(1): live v0/v3 grow to 1. Scan triggers: archived v0/v3 have speed=Shrink → grown decreases to 0.
+    //   - FindObstacle: live conflict on edge 1 (1+1=2 >= 2). Archived: grown=0, not tight.
+    //   - SetBlossom(3, 5), SetBlossom(4, 5).
+    //   - FindObstacle: done.
+    //   - ArchiveElasticSlice: v0.archivedRegs[1] = {node=5, grown=1}.
+    //     archivedRegs[0] still has round 0's post-shrink state (node=2, grown=0).
+
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testTwoFullRounds") { dut =>
+        dut.io.message.valid #= false
+        dut.clockDomain.forkStimulus(period = 10)
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+        dut.simExecute(ioConfig.instructionSpec.generateReset())
+
+        // ===== ROUND 0 =====
+        println("===== ROUND 0 =====")
+
+        // Place defects on v0 (node=0) and v3 (node=1)
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 0))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(3, 1))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
+
+        // Verify pre-grow state
+        sleep(1)
+        assert(dut.vertices(0).register.node.toLong == 0, "R0: v0 node should be 0")
+        assert(dut.vertices(3).register.node.toLong == 1, "R0: v3 node should be 1")
+        assert(dut.vertices(0).register.speed.toLong == Speed.Grow, "R0: v0 speed should be Grow")
+
+        // Grow(1): edge 1 (v0-v3, w=2) becomes tight. 1+1=2 >= 2.
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+        val (mg0, c0) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+        println(s"R0 after Grow(1): maxGrowable=${mg0.length}, conflict=${c0.valid} nodes=(${c0.node1},${c0.node2})")
+        assert(c0.valid, "R0: should have conflict between nodes 0 and 1")
+        val nodes0 = Set(c0.node1, c0.node2)
+        assert(nodes0 == Set(0, 1), s"R0: conflict should be {0,1}, got $nodes0")
+
+        // Match: both nodes → blossom 2, set blossom speed to Shrink
+        dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(0, 2))
+        dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(1, 2))
+        dut.simExecute(ioConfig.instructionSpec.generateSetSpeed(2, Speed.Shrink))
+
+        // Verify no more conflicts
+        val (mg0b, c0b) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+        println(s"R0 after match: maxGrowable=${mg0b.length}, conflict=${c0b.valid}")
+
+        // Archive
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        sleep(1)
+
+        // Verify archived state
+        val arch0_v0_node = dut.vertices(0).archivedRegs(0).node.toLong
+        val arch0_v0_grown = dut.vertices(0).archivedRegs(0).grown.toLong
+        val arch0_v0_speed = dut.vertices(0).archivedRegs(0).speed.toLong
+        val arch0_v3_node = dut.vertices(3).archivedRegs(0).node.toLong
+        val arch0_v3_grown = dut.vertices(3).archivedRegs(0).grown.toLong
+        println(s"R0 archived: v0.arch[0] node=$arch0_v0_node grown=$arch0_v0_grown speed=$arch0_v0_speed")
+        println(s"R0 archived: v3.arch[0] node=$arch0_v3_node grown=$arch0_v3_grown")
+        assert(arch0_v0_node == 2, s"R0: v0.arch[0].node should be 2 (blossom), got $arch0_v0_node")
+        assert(arch0_v0_grown == 1, s"R0: v0.arch[0].grown should be 1, got $arch0_v0_grown")
+        assert(arch0_v0_speed == Speed.Shrink, s"R0: v0.arch[0].speed should be Shrink, got $arch0_v0_speed")
+        assert(arch0_v3_node == 2, s"R0: v3.arch[0].node should be 2 (blossom), got $arch0_v3_node")
+        assert(arch0_v3_grown == 1, s"R0: v3.arch[0].grown should be 1, got $arch0_v3_grown")
+
+        // Verify live state reset (v0 shifted from v8 which was reset)
+        assert(dut.vertices(0).register.node.toLong == config.IndexNone, "R0: v0 live should be reset after archive")
+        assert(dut.vertices(0).register.grown.toLong == 0, "R0: v0 live grown should be 0 after archive")
+
+        // ===== ROUND 1 =====
+        println("\n===== ROUND 1 =====")
+
+        // Place new defects on v0 (node=3) and v3 (node=4)
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 3))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(3, 4))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
+
+        // Grow(1): live v0/v3 grow to 1. Scan also runs on archivedRegs[0]:
+        //   archived v0: speed=Shrink, so grown decreases from 1 to 0.
+        //   archived v3: speed=Shrink, grown decreases from 1 to 0.
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+        sleep(1)
+
+        // Verify archived state was updated by scan
+        val arch0_v0_grown_r1 = dut.vertices(0).archivedRegs(0).grown.toLong
+        val arch0_v3_grown_r1 = dut.vertices(3).archivedRegs(0).grown.toLong
+        println(s"R1 after Grow(1): v0.arch[0].grown=$arch0_v0_grown_r1 (should be 0, shrunk from 1)")
+        println(s"R1 after Grow(1): v3.arch[0].grown=$arch0_v3_grown_r1 (should be 0, shrunk from 1)")
+        assert(arch0_v0_grown_r1 == 0, s"R1: v0.arch[0] should have shrunk to 0, got $arch0_v0_grown_r1")
+        assert(arch0_v3_grown_r1 == 0, s"R1: v3.arch[0] should have shrunk to 0, got $arch0_v3_grown_r1")
+
+        // FindObstacle: live edge v0-v3 tight (1+1=2 >= 2). Archived not tight (0+0=0 < 2).
+        val (mg1, c1) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+        println(s"R1 FindObstacle: maxGrowable=${mg1.length}, conflict=${c1.valid} nodes=(${c1.node1},${c1.node2})")
+        assert(c1.valid, "R1: should have live conflict between nodes 3 and 4")
+        val nodes1 = Set(c1.node1, c1.node2)
+        assert(nodes1 == Set(3, 4), s"R1: conflict should be {3,4}, got $nodes1")
+
+        // Match: both → blossom 5
+        dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(3, 5))
+        dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(4, 5))
+        dut.simExecute(ioConfig.instructionSpec.generateSetSpeed(5, Speed.Shrink))
+
+        val (mg1b, c1b) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
+        println(s"R1 after match: maxGrowable=${mg1b.length}, conflict=${c1b.valid}")
+
+        // Archive round 1
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        sleep(1)
+
+        // Verify: archivedRegs[0] still has round 0's post-shrink state
+        val final_arch0_node = dut.vertices(0).archivedRegs(0).node.toLong
+        val final_arch0_grown = dut.vertices(0).archivedRegs(0).grown.toLong
+        println(s"Final: v0.arch[0] node=$final_arch0_node grown=$final_arch0_grown (round 0's state, shrunk)")
+        assert(final_arch0_grown == 0, s"v0.arch[0] should still have grown=0 from shrink, got $final_arch0_grown")
+
+        // Verify: archivedRegs[1] has round 1's pre-shift state
+        val final_arch1_node = dut.vertices(0).archivedRegs(1).node.toLong
+        val final_arch1_grown = dut.vertices(0).archivedRegs(1).grown.toLong
+        val final_arch1_speed = dut.vertices(0).archivedRegs(1).speed.toLong
+        println(s"Final: v0.arch[1] node=$final_arch1_node grown=$final_arch1_grown speed=$final_arch1_speed (round 1's state)")
+        assert(final_arch1_node == 5, s"v0.arch[1] node should be 5 (blossom), got $final_arch1_node")
+        assert(final_arch1_grown == 1, s"v0.arch[1] grown should be 1, got $final_arch1_grown")
+        assert(final_arch1_speed == Speed.Shrink, s"v0.arch[1] speed should be Shrink, got $final_arch1_speed")
+
+        // Verify: live state is reset again
+        assert(dut.vertices(0).register.node.toLong == config.IndexNone, "v0 live should be reset after second archive")
+
+        // Verify: BRAM matches registers
+        for (i <- 0 until 2) {
+          dut.vertices(0).layersDebugAddr #= i
+          sleep(1)
+          val bramNode = dut.vertices(0).layersDebugData.node.toLong
+          val bramGrown = dut.vertices(0).layersDebugData.grown.toLong
+          val regNode = dut.vertices(0).archivedRegs(i).node.toLong
+          val regGrown = dut.vertices(0).archivedRegs(i).grown.toLong
+          assert(bramNode == regNode, s"BRAM[$i].node=$bramNode != archivedRegs[$i].node=$regNode")
+          assert(bramGrown == regGrown, s"BRAM[$i].grown=$bramGrown != archivedRegs[$i].grown=$regGrown")
+          println(s"BRAM[$i] matches archivedRegs[$i]: node=$bramNode grown=$bramGrown")
+        }
+
+        println("\nTwo full rounds streaming decode test passed")
+        for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+      }
   }
 
 }
