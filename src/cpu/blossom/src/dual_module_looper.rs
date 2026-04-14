@@ -209,6 +209,32 @@ mod tests {
         dual_module_looper_basic_standard_syndrome(3, visualize_filename, defect_vertices, config);
     }
 
+    /// Evaluation-style check (benchmark `--verifier fusion-serial`): after Verilator decode, the
+    /// merged MWPM (embedded primal + `pre_matchings()` from hardware) must match optimal weight
+    /// and reproduce the syndrome.
+    #[test]
+    fn dual_module_looper_verify_merged_matching_vs_fusion_serial() {
+        // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_verify_merged_matching_vs_fusion_serial -- --nocapture
+        use crate::dual_module_adaptor::tests::dual_module_standard_optional_viz;
+
+        dual_module_standard_optional_viz(
+            3,
+            None,
+            vec![0, 4],
+            |initializer, positions| {
+                SolverEmbeddedLooper::new(
+                    MicroBlossomSingle::new(initializer, positions),
+                    json!({
+                        "dual": {
+                            "name": "dual_module_looper_verify_merged_matching_vs_fusion_serial",
+                            "sim_config": { "support_offloading": true },
+                        }
+                    }),
+                )
+            },
+        );
+    }
+
     /// test layer fusion
     #[test]
     fn dual_module_looper_basic_3() {
@@ -323,13 +349,12 @@ mod tests {
                 assert!(iterations < 1000, "round {round}: solve loop stuck after {iterations} iterations");
             }
 
-            archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+            archive_streaming_slice(&mut *dual);
 
             node_offset += defects.len();
             println!("round {round}: decoded {} defect(s) in {iterations} iterations", defects.len());
 
-            // After `archive_streaming_slice`, boundary breaks may leave non-terminal dual obstacles
-            // until the next round's fuse+solve — do not assert quiescence here.
+            // Do not assert post-archive quiescence here; the next round starts with fuse_layer and solve.
         }
 
         // Final: opposite top corners — two defects in one round after maximal archive depth
@@ -345,7 +370,7 @@ mod tests {
             iterations += 1;
             assert!(iterations < 1000, "final round: solve loop stuck after {iterations} iterations");
         }
-        archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+        archive_streaming_slice(&mut *dual);
         println!(
             "final round (v24+v31): decoded in {iterations} iterations after {} prior rounds — streaming ok",
             measurement_rounds.len()
@@ -438,7 +463,7 @@ mod tests {
                 );
             }
 
-            archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+            archive_streaming_slice(&mut *dual);
 
             // Print matching state after archive
             println!("  round {round} matchings:");
@@ -469,7 +494,7 @@ mod tests {
             final_iters += 1;
             assert!(final_iters < 1000, "final round stuck");
         }
-        archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+        archive_streaming_slice(&mut *dual);
 
         println!(
             "streaming_decode_n_rounds({num_rounds}): total_defects={total_defects}, \
@@ -567,49 +592,7 @@ mod tests {
         (dual, primal, graph, top_layer)
     }
 
-    fn break_layer_0_bottom_boundary_matchings(
-        dual: &mut DualModuleLooper,
-        primal: &mut crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
-        graph: &MicroBlossomSingle,
-    ) {
-        let layer_fusion = graph.layer_fusion.as_ref().expect("streaming archive requires layer fusion");
-        let layer_0_vertices: std::collections::HashSet<usize> =
-            layer_fusion.layers.first().into_iter().flatten().copied().collect();
-        let bottom_boundary_virtuals: std::collections::HashSet<usize> = graph
-            .weighted_edges
-            .iter()
-            .filter_map(|edge| {
-                let (real_vertex, virtual_vertex) = if layer_0_vertices.contains(&edge.l)
-                    && graph.virtual_vertices.contains(&edge.r)
-                {
-                    (edge.l, edge.r)
-                } else if layer_0_vertices.contains(&edge.r) && graph.virtual_vertices.contains(&edge.l) {
-                    (edge.r, edge.l)
-                } else {
-                    return None;
-                };
-                // Side boundaries stay on the same time slice; the bottom boundary sits below layer 0.
-                (graph.positions[virtual_vertex].t < graph.positions[real_vertex].t).then_some(virtual_vertex)
-            })
-            .collect();
-        if bottom_boundary_virtuals.is_empty() {
-            return;
-        }
-        primal.break_virtual_matchings_if(dual, |through_vertex, virtual_vertex| {
-            layer_0_vertices.contains(&(through_vertex.get() as usize))
-                && bottom_boundary_virtuals.contains(&(virtual_vertex.get() as usize))
-        });
-    }
-
-    fn archive_streaming_slice(
-        dual: &mut DualModuleLooper,
-        primal: &mut crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
-        graph: &MicroBlossomSingle,
-    ) {
-        break_layer_0_bottom_boundary_matchings(dual, primal, graph);
-        // No re-quiescence here: after MWPM completed for the round, boundary breaks are staging
-        // for the next measurement; `ArchiveElasticSlice` may shift that intentionally **broken**
-        // primal/dual state (e.g. unmatched + `Grow`) into the archive.
+    fn archive_streaming_slice(dual: &mut DualModuleLooper) {
         dual.archive_elastic_slice();
     }
 
@@ -647,19 +630,17 @@ mod tests {
     fn streaming_round(
         dual: &mut DualModuleLooper,
         primal: &mut crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
-        graph: &MicroBlossomSingle,
         defects: &[usize],
         node_offset: usize,
         top_layer: CompactLayerNum,
         round_label: &str,
     ) -> usize {
-        streaming_round_verbose(dual, primal, graph, defects, node_offset, top_layer, round_label, false)
+        streaming_round_verbose(dual, primal, defects, node_offset, top_layer, round_label, false)
     }
 
     fn streaming_round_verbose(
         dual: &mut DualModuleLooper,
         primal: &mut crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
-        graph: &MicroBlossomSingle,
         defects: &[usize],
         node_offset: usize,
         top_layer: CompactLayerNum,
@@ -698,7 +679,7 @@ mod tests {
             assert!(iterations < 2000, "{round_label}: solve loop stuck after {iterations} iterations");
         }
 
-        archive_streaming_slice(dual, primal, graph);
+        archive_streaming_slice(dual);
 
         // Print matching state
         if verbose {
@@ -751,17 +732,17 @@ mod tests {
     #[test]
     fn dual_module_looper_cross_layer_cluster() {
         // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_cross_layer_cluster -- --nocapture
-        let (mut dual, mut primal, graph, top_layer) = make_streaming_env(8);
+        let (mut dual, mut primal, _graph, top_layer) = make_streaming_env(8);
         let mut node_offset = 0usize;
 
         println!("=== Round 0: single defect on v24 ===");
-        let iters = streaming_round_verbose(&mut dual, &mut primal, &graph, &[24], node_offset, top_layer, "R0", true);
+        let iters = streaming_round_verbose(&mut dual, &mut primal, &[24], node_offset, top_layer, "R0", true);
         node_offset += 1;
         print_state(&dual, &primal, "R0 post-archive");
         println!("R0: {iters} iterations");
 
         println!("\n=== Round 1: second defect on v24 (v16 holds old v24) ===");
-        let iters = streaming_round_verbose(&mut dual, &mut primal, &graph, &[24], node_offset, top_layer, "R1", true);
+        let iters = streaming_round_verbose(&mut dual, &mut primal, &[24], node_offset, top_layer, "R1", true);
         node_offset += 1;
         print_state(&dual, &primal, "R1 post-archive");
         println!("R1: {iters} iterations");
@@ -770,7 +751,6 @@ mod tests {
         let iters = streaming_round_verbose(
             &mut dual,
             &mut primal,
-            &graph,
             &[24, 27],
             node_offset,
             top_layer,
@@ -792,12 +772,12 @@ mod tests {
     fn dual_module_looper_same_vertex_multiple_rounds() {
         // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_same_vertex_multiple_rounds -- --nocapture
 
-        let (mut dual, mut primal, graph, top_layer) = make_streaming_env(8);
+        let (mut dual, mut primal, _graph, top_layer) = make_streaming_env(8);
         let mut node_offset = 0usize;
 
         for round in 0..4 {
             println!("=== Round {round}: defect on v24, node={node_offset} ===");
-            let iters = streaming_round(&mut dual, &mut primal, &graph, &[24], node_offset, top_layer,
+            let iters = streaming_round(&mut dual, &mut primal, &[24], node_offset, top_layer,
                 &format!("R{round}"));
             node_offset += 1;
             println!("R{round}: {iters} iterations");
@@ -805,7 +785,7 @@ mod tests {
 
         // Final round: two defects to exercise cross-archive conflicts
         println!("\n=== Final: defects on v24,v27 ===");
-        let iters = streaming_round(&mut dual, &mut primal, &graph, &[24, 27], node_offset, top_layer, "Final");
+        let iters = streaming_round(&mut dual, &mut primal, &[24, 27], node_offset, top_layer, "Final");
         println!("Final: {iters} iterations");
 
         println!("\nsame vertex multiple rounds test passed");
@@ -823,7 +803,7 @@ mod tests {
         // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_cluster_across_archive_boundary -- --nocapture
         use micro_blossom_nostd::util::*;
 
-        let (mut dual, mut primal, graph, top_layer) = make_streaming_env(8);
+        let (mut dual, mut primal, _graph, top_layer) = make_streaming_env(8);
 
         // Round 0: defect on v24 (node=0). Grow + solve. The defect grows to a boundary.
         println!("=== Round 0: defect on v24 ===");
@@ -847,7 +827,7 @@ mod tests {
         }
         println!("R0: resolved in {iters} iterations, grown={total_grown}");
 
-        archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+        archive_streaming_slice(&mut *dual);
         print_state(&dual, &primal, "R0 post-archive");
 
         // Round 1: defect on v24 (node=1). After archive, v16 holds old v24's state.
@@ -870,7 +850,7 @@ mod tests {
         }
         println!("R1: resolved in {iters} iterations");
 
-        archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+        archive_streaming_slice(&mut *dual);
         print_state(&dual, &primal, "R1 post-archive");
 
         // Round 2: both v24 and v27. Two new defects on top layer, while archived state
@@ -891,7 +871,7 @@ mod tests {
         }
         println!("R2: resolved in {iters} iterations");
 
-        archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+        archive_streaming_slice(&mut *dual);
         print_state(&dual, &primal, "R2 post-archive");
         println!("\ncluster across archive boundary test passed");
     }
@@ -901,7 +881,7 @@ mod tests {
     #[test]
     fn dual_module_looper_empty_rounds_interspersed() {
         // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_empty_rounds_interspersed -- --nocapture
-        let (mut dual, mut primal, graph, top_layer) = make_streaming_env(8);
+        let (mut dual, mut primal, _graph, top_layer) = make_streaming_env(8);
         let mut node_offset = 0usize;
 
         let rounds: Vec<Vec<usize>> = vec![
@@ -916,7 +896,7 @@ mod tests {
         ];
 
         for (round, defects) in rounds.iter().enumerate() {
-            let iters = streaming_round(&mut dual, &mut primal, &graph, defects, node_offset, top_layer,
+            let iters = streaming_round(&mut dual, &mut primal, defects, node_offset, top_layer,
                 &format!("R{round}"));
             println!("round {round}: {} defect(s), {iters} iterations", defects.len());
             node_offset += defects.len();
@@ -933,7 +913,7 @@ mod tests {
         // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_archived_blossom_shrink -- --nocapture
         use micro_blossom_nostd::util::*;
 
-        let (mut dual, mut primal, graph, top_layer) = make_streaming_env(8);
+        let (mut dual, mut primal, _graph, top_layer) = make_streaming_env(8);
 
         // Round 0: two defects on v24, v27 → they conflict → blossom created
         println!("=== Round 0: create blossom from v24,v27 conflict ===");
@@ -954,7 +934,7 @@ mod tests {
         println!("R0: {iters} iterations — blossom formed and matched");
 
         // Archive: the blossom state (possibly with speed=Shrink) goes into archive
-        archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+        archive_streaming_slice(&mut *dual);
 
         // Round 1: continue growing. The archived blossom may shrink.
         // If it shrinks to 0, the hardware clamps (no underflow).
@@ -975,7 +955,7 @@ mod tests {
         println!("R1: {iters} iterations — no underflow crash");
 
         // Round 2: more growth to stress the shrunk blossom further
-        archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+        archive_streaming_slice(&mut *dual);
         println!("\n=== Round 2: continued growth ===");
         dual.add_defect(ni!(28), ni!(3));
         dual.fuse_layer(top_layer);
@@ -989,7 +969,7 @@ mod tests {
             iters += 1;
             assert!(iters < 100, "R2 stuck");
         }
-        archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+        archive_streaming_slice(&mut *dual);
         println!("R2: {iters} iterations — archived blossom shrink test passed");
     }
 
@@ -998,14 +978,14 @@ mod tests {
     #[test]
     fn dual_module_looper_max_defects_per_round() {
         // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_max_defects_per_round -- --nocapture
-        let (mut dual, mut primal, graph, top_layer) = make_streaming_env(8);
+        let (mut dual, mut primal, _graph, top_layer) = make_streaming_env(8);
         let mut node_offset = 0usize;
 
         // 3 rounds, each with all 4 top-layer defects
         for round in 0..3 {
             println!("=== Round {round}: all 4 top-layer defects ===");
             let iters = streaming_round(
-                &mut dual, &mut primal, &graph,
+                &mut dual, &mut primal,
                 &[24, 27, 28, 31],
                 node_offset, top_layer,
                 &format!("R{round}"),
@@ -1016,15 +996,14 @@ mod tests {
 
         // Final: single defect after complex history
         println!("\n=== Final: single defect after 3 max-defect rounds ===");
-        let iters = streaming_round(&mut dual, &mut primal, &graph, &[24], node_offset, top_layer, "Final");
+        let iters = streaming_round(&mut dual, &mut primal, &[24], node_offset, top_layer, "Final");
         println!("Final: {iters} iterations — max defects test passed");
     }
 
     /// Archive–live pairing along one fusion column after **hardware archive warmup**.
     ///
     /// Round 0: interior top vertex, node 0 — **decode to quiescence first**, then
-    /// `archive_streaming_slice` (break layer-0 → bottom-boundary virtual matchings, then
-    /// `ArchiveElasticSlice` with **no** re-quiescence so broken/staging state may be archived).
+    /// `archive_streaming_slice` (`ArchiveElasticSlice` after a quiescent solve).
     ///
     /// Next `num_layers - 1` rounds: **empty** syndromes (`fuse_layer` → solve → archive each).
     /// On a **2-layer** graph that is one round, completing `warmupDone` while keeping a stable
@@ -1058,12 +1037,11 @@ mod tests {
             "Using interior vertex v{interior_v} (d=5, {num_layers} layers, warmup={warmup_rounds})"
         );
 
-        // Round 0: decode to quiescence, then archive (includes bottom-boundary virtual break).
+        // Round 0: decode to quiescence, then archive.
         println!("\n=== Round 0: defect on v{interior_v} (node=0), solve then archive ===");
         streaming_round_verbose(
             &mut dual,
             &mut primal,
-            &graph,
             &[interior_v],
             0,
             top_layer,
@@ -1078,7 +1056,6 @@ mod tests {
             streaming_round_verbose(
                 &mut dual,
                 &mut primal,
-                &graph,
                 &[],
                 1,
                 top_layer,
@@ -1090,7 +1067,7 @@ mod tests {
 
         // Final: new defect same spatial site (node 1); must pair with prior round's node 0.
         println!("\n=== Final: defect on v{interior_v} (node=1) — expect peer 0↔1 ===");
-        streaming_round_verbose(&mut dual, &mut primal, &graph, &[interior_v], 1, top_layer, "R_final", true);
+        streaming_round_verbose(&mut dual, &mut primal, &[interior_v], 1, top_layer, "R_final", true);
         print_state(&dual, &primal, "R_final");
 
         println!("\nFinal matchings:");
@@ -1109,11 +1086,143 @@ mod tests {
         } else {
             println!(
                 "  NOTE: solve-first R0 often yields spatial/temporal virtuals instead of peer 0↔1; \
-                 matchings={matchings:?}. Boundary break runs before each archive without re-quiescence."
+                 matchings={matchings:?}."
             );
         }
 
         println!("\narchive-dependent matching test passed");
+    }
+
+    /// `true` if `obstacle` is a conflict where some **real** endpoint lies on a fusion sheet
+    /// strictly **below** the live top (`layer_id < top_layer_id`), e.g. growth from the top
+    /// defect reached an interior vertex on an older time slice (elastic archive column).
+    fn conflict_touches_below_top_fusion_layer(
+        graph: &crate::resources::MicroBlossomSingle,
+        top_layer_id: usize,
+        obstacle: &CompactObstacle,
+    ) -> bool {
+        let Some(lf) = graph.layer_fusion.as_ref() else {
+            return false;
+        };
+        match obstacle {
+            CompactObstacle::Conflict { vertex_1, vertex_2, .. } => {
+                let a = vertex_1.get() as usize;
+                let b = vertex_2.get() as usize;
+                let la = lf.vertex_layer_id.get(&a).copied();
+                let lb = lf.vertex_layer_id.get(&b).copied();
+                la.map(|l| l < top_layer_id).unwrap_or(false)
+                    || lb.map(|l| l < top_layer_id).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    /// Sub-top fusion contact, then **two** archive-advancing empties, then a fresh live-top decode.
+    ///
+    /// Uses `noisy_measurements = 3` → **four** fusion layers (with `noisy_measurements = 2` every
+    /// real vertex lies on the top time slice and typical conflicts never name a sub-top layer id).
+    ///
+    /// **Seed:** one top defect — the first alternating-tree conflicts include a real vertex on a
+    /// fusion sheet **below** the live top (e.g. v24 vs v16 on phenomenological d=3).
+    ///
+    /// **Warmup:** two empty streaming rounds (fuse → solve → archive each) advance the elastic
+    /// stack by two layer slices.
+    ///
+    /// **Challenge:** a new defect on the same top site (new node id) must still decode to
+    /// quiescence. After deep archive the first conflict may stay on the top sheet (e.g. v24–v26);
+    /// the sub-top geometry is asserted on the **seed** decode where the column is unambiguous.
+    #[test]
+    fn dual_module_looper_alternating_tree_grows_into_two_layer_archive() {
+        // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_alternating_tree_grows_into_two_layer_archive -- --nocapture
+        use micro_blossom_nostd::util::*;
+
+        let (mut dual, mut primal, graph, top_layer) = make_streaming_env_custom(3, 3, 8);
+        let lf = graph.layer_fusion.as_ref().unwrap();
+        let top_layer_id = lf.num_layers - 1;
+        assert!(
+            lf.num_layers >= 4,
+            "expected noisy_measurements=3 → at least four fusion layers so sub-top growth is observable"
+        );
+        let top_verts: Vec<usize> = lf.layers.last().unwrap().clone();
+        // Prefer v24 when present — same top corner as other archive tests (fusion column v24→v16…).
+        let v_top = if top_verts.contains(&24) {
+            24
+        } else {
+            *top_verts.first().expect("non-empty top layer")
+        };
+
+        let mut saw_below_top = false;
+
+        println!(
+            "\n=== Seed (d=3, {} layers): top defect v{v_top}, node 0 — expect sub-top fusion in conflicts ===",
+            lf.num_layers
+        );
+        dual.add_defect(ni!(v_top), ni!(0));
+        dual.fuse_layer(top_layer);
+        primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
+        let mut seed_iters = 0usize;
+        let (mut obstacle, grown) = dual.find_obstacle();
+        println!("  [seed] initial obstacle: {} (grown={grown})", format_obstacle(&obstacle));
+        while !obstacle.is_none() {
+            if conflict_touches_below_top_fusion_layer(&graph, top_layer_id, &obstacle) {
+                saw_below_top = true;
+                println!(
+                    "  [seed] iter {seed_iters}: below-top fusion touch — {}",
+                    format_obstacle(&obstacle)
+                );
+            }
+            primal.resolve(&mut *dual, obstacle);
+            (obstacle, _) = dual.find_obstacle();
+            seed_iters += 1;
+            assert!(seed_iters < 2000, "seed solve stuck after {seed_iters} iterations");
+        }
+        assert!(
+            saw_below_top,
+            "seed decode should hit a sub-top fusion vertex (e.g. v24 vs v16); top_layer_id={top_layer_id}"
+        );
+        archive_streaming_slice(&mut *dual);
+        println!("  [seed] done in {seed_iters} resolve iters");
+
+        println!("\n=== Two empty rounds (archive-advance ×2) ===");
+        streaming_round_verbose(&mut dual, &mut primal, &[], 1, top_layer, "empty0", true);
+        streaming_round_verbose(&mut dual, &mut primal, &[], 1, top_layer, "empty1", true);
+
+        println!(
+            "\n=== Challenge: live-top defect v{v_top} (node 2) — must quiesce after two layer archives ==="
+        );
+        dual.add_defect(ni!(v_top), ni!(2));
+        dual.fuse_layer(top_layer);
+        primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
+
+        let mut challenge_iters = 0usize;
+        let (mut obstacle, grown) = dual.find_obstacle();
+        println!("  [challenge] initial obstacle: {} (grown={grown})", format_obstacle(&obstacle));
+        while !obstacle.is_none() {
+            if conflict_touches_below_top_fusion_layer(&graph, top_layer_id, &obstacle) {
+                println!(
+                    "  [challenge] iter {challenge_iters}: below-top fusion touch — {}",
+                    format_obstacle(&obstacle)
+                );
+            }
+            primal.resolve(&mut *dual, obstacle);
+            (obstacle, _) = dual.find_obstacle();
+            challenge_iters += 1;
+            assert!(
+                challenge_iters < 2000,
+                "challenge solve stuck after {challenge_iters} iterations"
+            );
+        }
+
+        assert!(
+            challenge_iters >= 1,
+            "expected at least one resolve step on the challenge decode, got {challenge_iters}"
+        );
+
+        archive_streaming_slice(&mut *dual);
+        println!(
+            "\ndual_module_looper_alternating_tree_grows_into_two_layer_archive passed \
+             (seed iters={seed_iters}, challenge iters={challenge_iters}, v_top={v_top})"
+        );
     }
 
     /// Shortest hop count between two vertices (unweighted BFS on `weighted_edges`).
@@ -1208,13 +1317,12 @@ mod tests {
         dual.add_defect(ni!(v_b), ni!(1));
         dual.fuse_layer(top_layer);
         primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
-        archive_streaming_slice(&mut *dual, &mut *primal, &graph);
+        archive_streaming_slice(&mut *dual);
 
         for i in 0..warmup_rounds {
             streaming_round_verbose(
                 &mut dual,
                 &mut primal,
-                &graph,
                 &[],
                 0,
                 top_layer,
@@ -1227,7 +1335,6 @@ mod tests {
         streaming_round_verbose(
             &mut dual,
             &mut primal,
-            &graph,
             &[v_a, v_b],
             2,
             top_layer,
@@ -1261,35 +1368,32 @@ mod tests {
     /// archived elastic data exists under one column but not the other. Round 4 loads both sites
     /// together so the dual must handle **mixed** archive presence on the fused graph.
     ///
-    /// Each round uses `streaming_round_verbose` → `archive_streaming_slice`, which breaks
-    /// matchings to the **bottom** (time-below layer-0) spatial virtual boundary on layer-0
-    /// vertices then archives **without** re-quiescence so that staging state can live in the
-    /// elastic archive until the next round’s fuse+solve.
+    /// Each round uses `streaming_round_verbose` → `archive_streaming_slice` after a quiescent solve.
     ///
     /// The final primal may show a **blossom** outer index (e.g. node 32) after resolving the
     /// pair — that is normal MWPM, not a failure.
     #[test]
     fn dual_module_looper_asymmetric_archive() {
         // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_asymmetric_archive -- --nocapture
-        let (mut dual, mut primal, graph, top_layer) = make_streaming_env(8);
+        let (mut dual, mut primal, _graph, top_layer) = make_streaming_env(8);
 
         // Round 0: defect on v24 only (maps to v0 column).
         println!("=== Round 0: defect on v24 (node=0) ===");
-        streaming_round_verbose(&mut dual, &mut primal, &graph, &[24], 0, top_layer, "R0", true);
+        streaming_round_verbose(&mut dual, &mut primal, &[24], 0, top_layer, "R0", true);
 
         // Rounds 1, 2: empty shifts.
         println!("\n=== Rounds 1-2: empty ===");
-        streaming_round_verbose(&mut dual, &mut primal, &graph, &[], 1, top_layer, "R1", true);
-        streaming_round_verbose(&mut dual, &mut primal, &graph, &[], 1, top_layer, "R2", true);
+        streaming_round_verbose(&mut dual, &mut primal, &[], 1, top_layer, "R1", true);
+        streaming_round_verbose(&mut dual, &mut primal, &[], 1, top_layer, "R2", true);
 
         // Round 3: defect on v27 (maps to v3 column — different from round 0's v0 column).
         println!("\n=== Round 3: defect on v27 (node=1) ===");
-        streaming_round_verbose(&mut dual, &mut primal, &graph, &[27], 1, top_layer, "R3", true);
+        streaming_round_verbose(&mut dual, &mut primal, &[27], 1, top_layer, "R3", true);
         print_state(&dual, &primal, "R3");
 
         // Round 4: defects on both v24 and v27
         println!("\n=== Round 4: defects on v24 (node=2), v27 (node=3) ===");
-        streaming_round_verbose(&mut dual, &mut primal, &graph, &[24, 27], 2, top_layer, "R4", true);
+        streaming_round_verbose(&mut dual, &mut primal, &[24, 27], 2, top_layer, "R4", true);
         print_state(&dual, &primal, "R4");
 
         println!("\nasymmetric archive test passed");

@@ -192,6 +192,44 @@ pub mod tests {
     use fusion_blossom::mwpm_solver::*;
     use fusion_blossom::primal_module::*;
     use fusion_blossom::visualize::*;
+    use std::collections::BTreeSet;
+
+    /// Same checks as `fusion_blossom::cli::VerifierFusionSerial` (benchmark `--verifier fusion-serial`),
+    /// plus a syndrome check on the **merged** MWPM: primal matchings plus dual `pre_matchings()`
+    /// (hardware-only pairs exposed from Verilator / `simPreMatchings`, merged in
+    /// [`crate::mwpm_solver::SolverEmbeddedBoxed::perfect_matching_visualizer`]).
+    pub fn assert_fusion_serial_decoder_verify<S: PrimalDualSolver>(
+        solver: &mut S,
+        initializer: &SolverInitializer,
+        syndrome_pattern: &SyndromePattern,
+    ) {
+        let mut reference = SolverSerial::new(initializer);
+        reference.clear();
+        reference.solve_visualizer(syndrome_pattern, None);
+        let standard_total_weight = reference.sum_dual_variables();
+        assert_eq!(
+            solver.sum_dual_variables(),
+            standard_total_weight,
+            "unexpected final dual variable sum (benchmark --verifier fusion-serial)"
+        );
+        let mwpm = solver.perfect_matching();
+        let mut subgraph_builder = SubGraphBuilder::new(initializer);
+        subgraph_builder.clear();
+        subgraph_builder.load_erasures(&syndrome_pattern.erasures);
+        subgraph_builder.load_perfect_matching(&mwpm);
+        assert_eq!(
+            subgraph_builder.total_weight(),
+            standard_total_weight,
+            "unexpected perfect matching weight (merged primal + hardware pre-matching)"
+        );
+        let subgraph = subgraph_builder.get_subgraph();
+        let subgraph_defects = initializer.syndrome_of(&subgraph);
+        let original: BTreeSet<_> = syndrome_pattern.defect_vertices.iter().copied().collect();
+        assert_eq!(
+            subgraph_defects, original,
+            "merged matching subgraph does not reproduce the syndrome"
+        );
+    }
 
     pub fn dual_module_standard_optional_viz<Solver: PrimalDualSolver + Sized>(
         d: VertexNum,
@@ -221,21 +259,8 @@ pub mod tests {
         let syndrome = code.get_syndrome();
         let mut solver = constructor(&initializer, &code.get_positions());
         solver.solve_visualizer(&syndrome, visualizer.as_mut());
-        let subgraph = solver.subgraph_visualizer(visualizer.as_mut());
-        // first check that the subgraph indeed corresponds to the syndrome
-        let subgraph_defects = initializer.syndrome_of(&subgraph);
-        let original_defects = defect_vertices.iter().cloned().collect();
-        assert_eq!(subgraph_defects, original_defects, "does not correct the defects");
-        // then check the weight is the same
-        let mut standard_solver = SolverSerial::new(&initializer);
-        standard_solver.solve_visualizer(&syndrome, None);
-        let standard_subgraph = standard_solver.subgraph_visualizer(None);
-        let mut subgraph_builder = SubGraphBuilder::new(&initializer);
-        subgraph_builder.load_subgraph(&subgraph);
-        let total_weight = subgraph_builder.total_weight();
-        subgraph_builder.load_subgraph(&standard_subgraph);
-        let standard_total_weight = subgraph_builder.total_weight();
-        assert_eq!(total_weight, standard_total_weight);
+        assert_fusion_serial_decoder_verify(&mut solver, &initializer, &syndrome);
+        let _subgraph = solver.subgraph_visualizer(visualizer.as_mut());
         solver
     }
 }
