@@ -155,6 +155,40 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
             .iterate_intermediate_matching(|node_index, match_target, link| func(self, node_index, match_target, link));
     }
 
+    /// break selected virtual matchings and re-grow the affected outer nodes.
+    pub fn break_virtual_matchings_if(
+        &mut self,
+        dual_module: &mut impl DualInterface,
+        mut should_break: impl FnMut(CompactVertexIndex, CompactVertexIndex) -> bool,
+    ) {
+        for node_index in self.nodes.index_iter() {
+            let node = ni!(node_index);
+            if !self.nodes.has_node(node) {
+                continue;
+            }
+            let Some((through_vertex, virtual_vertex)) = ({
+                let primal_node = self.nodes.get_node(node);
+                if !primal_node.is_outer_blossom() || !primal_node.is_matched() {
+                    None
+                } else {
+                    match primal_node.get_matched() {
+                        CompactMatchTarget::VirtualVertex(virtual_vertex) => {
+                            Some((usu!(primal_node.link.through), virtual_vertex))
+                        }
+                        CompactMatchTarget::Peer(_) => None,
+                    }
+                }
+            }) else {
+                continue;
+            };
+            if should_break(through_vertex, virtual_vertex) {
+                let primal_node = self.nodes.get_node_mut(node);
+                primal_node.remove_from_matching();
+                self.nodes.set_speed(node, CompactGrowState::Grow, dual_module);
+            }
+        }
+    }
+
     /// handle an up-to-date conflict event
     pub fn resolve_conflict(
         &mut self,

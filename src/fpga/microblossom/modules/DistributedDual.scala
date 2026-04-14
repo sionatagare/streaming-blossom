@@ -1287,6 +1287,27 @@ class DistributedDualTest extends AnyFunSuite {
 // sbt 'testOnly microblossom.modules.MultiLayerArchiveTest'
 class MultiLayerArchiveTest extends AnyFunSuite {
 
+  private def warmUpArchive(dut: DistributedDual, config: DualConfig, ioConfig: DualConfig): Unit = {
+    // The first committed archive entry appears only after numLayers-1 warmup shifts.
+    for (_ <- 0 until (config.numLayers.toInt - 1)) {
+      dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+    }
+    sleep(1)
+  }
+
+  private def archiveTopLayerStateIntoFirstEntry(
+    dut: DistributedDual,
+    config: DualConfig,
+    ioConfig: DualConfig
+  ): Unit = {
+    // The first valid archive entry appears only after the donor chain has shifted
+    // top-layer state all the way down to layer 0.
+    for (_ <- 0 until config.numLayers.toInt) {
+      dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+    }
+    sleep(1)
+  }
+
   // ========================================================================
   // Multi-layer archive tests
   // ========================================================================
@@ -1758,7 +1779,10 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 0))
         dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
         dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
-        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        // The archive only becomes valid after the layer-shift warmup reaches layer 0.
+        for (_ <- 0 until config.numLayers.toInt) {
+          dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        }
 
         // Issue Grow(1) and track busy signal
         dut.io.message.valid #= true
@@ -1773,8 +1797,7 @@ class MultiLayerArchiveTest extends AnyFunSuite {
           dut.clockDomain.waitSampling()
         }
 
-        // busy should have been high for archiveValidCount + executeLatency - 1 cycles
-        // (archiveValidCount=1 at this point, so 1 + executeLatency - 1 = executeLatency)
+        // With one valid archived entry, busy should pulse for the scan/drain window.
         println(s"Busy was high for $busyCycles cycles (expected ~${config.executeLatency})")
         assert(busyCycles > 0, "busy should go high during scan")
         assert(busyCycles < maxWait, "busy should eventually go low")
@@ -2235,32 +2258,12 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
 
         dut.simExecute(ioConfig.instructionSpec.generateReset())
-        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 0))
-        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(27, 1))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 10))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(27, 11))
         dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
 
-        // No growth yet — archive immediately
-        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
-        sleep(1)
-
-        // Archived pair in layer-0 regs: v0.archivedRegs[0] and v3.archivedRegs[0]
-        // should have the shifted states of v24/v27 (node=0/1, grown=0, speed=Grow)
-        // Actually: v0 gets v8's old state (reset), not v24's. v24→v16→v8→v0.
-        // After one archive: v0.archivedRegs[0] = v0's pre-shift state (reset).
-        // The v24/v27 defect data is now at v16/v19 (live), not in the archive yet.
-
-        // We need to grow the live state (v16/v19) then archive again to push it deeper.
-        // Or: place defects on layer 0 directly.
-
-        // Simpler approach: place defects on v0 and v3 (layer 0, elastic), grow, archive
-        dut.simExecute(ioConfig.instructionSpec.generateReset())
-        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 10))
-        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(3, 11))
-        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
-
-        // Don't grow yet — both have grown=0, speed=Grow. Archive.
-        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
-        sleep(1)
+        // Shift the top-layer pair all the way into the first valid archive entry.
+        archiveTopLayerStateIntoFirstEntry(dut, config, ioConfig)
 
         // archivedRegs[0] for v0: node=10, grown=0, speed=Grow
         // archivedRegs[0] for v3: node=11, grown=0, speed=Grow
@@ -2299,13 +2302,12 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
 
         dut.simExecute(ioConfig.instructionSpec.generateReset())
-        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 0))
-        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 0))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
         dut.simExecute(ioConfig.instructionSpec.generateGrow(3))
 
-        // v0: node=0, grown=3, speed=Grow. Archive.
-        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
-        sleep(1)
+        // Shift the grown top-layer state into the first valid archive entry.
+        archiveTopLayerStateIntoFirstEntry(dut, config, ioConfig)
         val grownBefore = dut.vertices(0).archivedRegs(0).grown.toLong
         println(s"After archive: grown=$grownBefore")
         assert(grownBefore == 3, s"archived grown should be 3, got $grownBefore")
@@ -2338,12 +2340,11 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
 
         dut.simExecute(ioConfig.instructionSpec.generateReset())
-        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 0))
-        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(3, 1))
-        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 0))
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(27, 1))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
         dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
-        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
-        sleep(1)
+        archiveTopLayerStateIntoFirstEntry(dut, config, ioConfig)
 
         val node0before = dut.vertices(0).archivedRegs(0).node.toLong
         val node3before = dut.vertices(3).archivedRegs(0).node.toLong
@@ -2648,14 +2649,12 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
 
         dut.simExecute(ioConfig.instructionSpec.generateReset())
+        warmUpArchive(dut, config, ioConfig)
 
-        // Round 0: place defects on v0, v3 (layer 0 elastic, edge 1 weight=2)
-        // Un-virtualize layer 0. Grow by 0 (don't grow yet). Archive.
+        // Round 0: create the first valid archive entry directly from layer 0.
         dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 0))
         dut.simExecute(ioConfig.instructionSpec.generateAddDefect(3, 1))
         dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
-
-        // Archive WITHOUT growing — archived pair has grown=0, speed=Grow
         dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
         sleep(1)
 
@@ -2707,12 +2706,14 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
 
         dut.simExecute(ioConfig.instructionSpec.generateReset())
+        warmUpArchive(dut, config, ioConfig)
 
-        // Place defects on v0 and v3 (elastic, edge 1, weight=2)
+        // Create the first valid archive entry directly from layer 0.
         dut.simExecute(ioConfig.instructionSpec.generateAddDefect(0, 0))
         dut.simExecute(ioConfig.instructionSpec.generateAddDefect(3, 1))
         dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(0))
         dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        sleep(1)
 
         // Grow until archived pair is tight
         dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
@@ -2871,6 +2872,7 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
 
         dut.simExecute(ioConfig.instructionSpec.generateReset())
+        warmUpArchive(dut, config, ioConfig)
 
         // ===== ROUND 0 =====
         println("===== ROUND 0 =====")
@@ -2903,7 +2905,7 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         val (mg0b, c0b) = dut.simExecute(ioConfig.instructionSpec.generateFindObstacle())
         println(s"R0 after match: maxGrowable=${mg0b.length}, conflict=${c0b.valid}")
 
-        // Archive
+        // Archive now that warmup is complete.
         dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
         sleep(1)
 
