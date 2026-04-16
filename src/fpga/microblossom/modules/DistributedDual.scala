@@ -214,12 +214,17 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     val writebackValid = scanActive && (scanTick >= U(config.executeLatency, scanTickWidth bits)) &&
       (writebackTick < archiveValidCount.resize(scanTickWidth))
 
+    // Reverse scan order: most recent entry (highest address) first.
+    // This ensures fusion edges see the temporally adjacent archived pair first.
+    val reversedScanIndex = (archiveValidCount - 1).resize(scanTickWidth) - scanTick
+    val reversedWritebackIndex = (archiveValidCount - 1).resize(scanTickWidth) - writebackTick
+
     edgeScanActive := scanActive
     edgeScanFeeding := scanFeeding
-    edgeScanIndex := scanTick.resize(config.archiveAddressBits)
+    edgeScanIndex := reversedScanIndex.resize(config.archiveAddressBits)
     archiveWriteAddr := archiveWriteCounter
     scanWritebackEn := writebackValid
-    scanWritebackIndex := writebackTick.resize(config.archiveAddressBits)
+    scanWritebackIndex := reversedWritebackIndex.resize(config.archiveAddressBits)
 
     io.elasticArchivePipelineBusy := scanActive
     // Let the triggering instruction through; block subsequent ones

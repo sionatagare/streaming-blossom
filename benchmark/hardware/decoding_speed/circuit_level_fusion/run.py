@@ -14,6 +14,15 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
 # SAMPLES = 10_000  # draft
 SAMPLES = 1_00_000  # final
 
+# Streaming (`USE_STREAMING=1`): RTL elastic archive BRAM depth. This is **not** SAMPLES (you still run
+# 100k rounds with one finite BRAM); it must be large enough that the archive pipeline never runs out
+# of commit slots for your graph + streaming pattern (see DistributedDual). Too small → hang in
+# `find_obstacle`. Larger → more FPGA RAM. Override: `export ARCHIVE_DEPTH=256`.
+STREAMING_DEFAULT_ARCHIVE_DEPTH = 128
+
+if os.environ.get("USE_STREAMING") and "ARCHIVE_DEPTH" not in os.environ:
+    os.environ["ARCHIVE_DEPTH"] = str(STREAMING_DEFAULT_ARCHIVE_DEPTH)
+
 
 if __name__ == "__main__":
     data = []
