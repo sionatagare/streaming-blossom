@@ -120,9 +120,11 @@ case class DualConfig(
       case (None, None)         => None
     }
   }
-  /** BRAM indices that an edge at layer `edgeLayer` should check: L, L+numLayers, L+2*numLayers, ... */
+  /** BRAM indices that an edge at layer `edgeLayer` should check.
+    * The elastic shift brings all data to layer 0 before committing, so the BRAM layout is sequential
+    * (addresses 0, 1, 2, ...). Every entry contains layer-0 data and must be checked by all edges. */
   def archiveScanAddressesOf(edgeLayer: Int): Seq[Int] =
-    (edgeLayer until archiveDepth by numLayers.toInt)
+    (0 until archiveDepth)
   /** True if this is a fusion edge whose both endpoints map to the same layer-0 counterpart vertex. */
   def isFusionEdgeSameL0(edgeIndex: Int): Boolean = {
     val (l, r) = incidentVerticesOf(edgeIndex)

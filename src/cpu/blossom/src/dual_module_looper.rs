@@ -1494,6 +1494,167 @@ mod tests {
         assert!(all_nodes_matched, "comb reference: not all nodes matched: {final_matchings:?}");
     }
 
+    /// Two live defects vs one archived pair: both v24 and v27 get new defects after warmup.
+    /// This forces the primal to resolve archived conflicts involving all 4 nodes (0,1 archived + 2,3 live).
+    /// The archived pair n0↔n1 interacts with both live defects, testing richer alternating tree formation.
+    #[test]
+    fn dual_module_looper_boundary7_v24v27_warmup_then_v24v27() {
+        use micro_blossom_nostd::util::*;
+
+        let graph = MicroBlossomSingle::phenomenological_rotated_d3_archive_v24_v27_then_v27();
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+        let warmup_rounds = num_layers.saturating_sub(1);
+        let layer_0_vertices: std::collections::HashSet<u32> = graph.layer_fusion.as_ref().unwrap().layers[0]
+            .iter()
+            .map(|vertex| *vertex as u32)
+            .collect();
+        let (mut dual, mut primal, graph, top_layer) = make_streaming_env_from_graph(graph, 8);
+
+        // Fuse all layers at init
+        for layer_id in 0..num_layers {
+            dual.fuse_layer(layer_id as CompactLayerNum);
+            primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+        }
+
+        println!("\n  === R0: defects v24+v27 (nodes 0,1) ===");
+        streaming_round_verbose(&mut dual, &mut primal, &[24, 27], 0, top_layer, "R0", true);
+        let r0_matchings = collect_outer_matchings(&primal);
+        assert_peer_pair(&r0_matchings, 0, 1);
+
+        println!("\n  === WARMUP ({warmup_rounds} rounds) ===");
+        for i in 0..warmup_rounds {
+            streaming_round_verbose(&mut dual, &mut primal, &[], 2, top_layer, &format!("warmup_{i}"), false);
+        }
+
+        println!("\n  === R_final: defects v24+v27 (nodes 2,3) — both interact with archived pair ===");
+        dual.add_defect(ni!(24), ni!(2));
+        dual.add_defect(ni!(27), ni!(3));
+        dual.fuse_layer(top_layer);
+        primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
+
+        let mut final_iterations = 0;
+        let mut saw_archived_conflict = false;
+        let (mut obstacle, grown) = dual.find_obstacle();
+        println!("  [R_final] initial obstacle: {} (grown={grown})", format_obstacle(&obstacle));
+        while !obstacle.is_none() {
+            if let CompactObstacle::Conflict { vertex_1, vertex_2, .. } = obstacle {
+                let v1 = vertex_1.get();
+                let v2 = vertex_2.get();
+                if layer_0_vertices.contains(&v1) || layer_0_vertices.contains(&v2) {
+                    saw_archived_conflict = true;
+                }
+            }
+            println!("  [R_final] iter {final_iterations}: resolving {}", format_obstacle(&obstacle));
+            primal.resolve(&mut *dual, obstacle);
+            let (next_obstacle, next_grown) = dual.find_obstacle();
+            obstacle = next_obstacle;
+            println!("  [R_final] iter {final_iterations}: after resolve → {} (grown={next_grown})", format_obstacle(&obstacle));
+            final_iterations += 1;
+            assert!(final_iterations < 2000, "R_final: solve loop stuck after {final_iterations} iterations");
+        }
+        let final_matchings = collect_outer_matchings(&primal);
+        println!("  [R_final] final matchings: {final_matchings:?}");
+        assert!(
+            saw_archived_conflict,
+            "expected archived / cross-layer conflict; final_matchings={final_matchings:?}"
+        );
+        // All 4 nodes (0,1,2,3) must be matched
+        assert!(final_matchings.len() >= 2, "not all nodes matched: {final_matchings:?}");
+        println!("\n  === dual_module_looper_boundary7_v24v27_warmup_then_v24v27 — PASS ===");
+    }
+
+    /// Three rounds of defects at v24+v27, each separated by `numLayers-1` empty flush rounds
+    /// so the live state is clean before the next defect round. All 3 pairs archive identically
+    /// (grown=60 each). The final defect at v27 triggers a chain of archived conflicts through
+    /// all 3 entries, producing an alternating tree: n0→boundary, n1↔n6, n2↔n5, n3↔n4.
+    #[test]
+    fn dual_module_looper_boundary7_multi_round_alternating_tree() {
+        use micro_blossom_nostd::util::*;
+
+        let graph = MicroBlossomSingle::phenomenological_rotated_d3_archive_v24_v27_then_v27();
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+        let flush_rounds = num_layers.saturating_sub(1); // 3 empty rounds to flush shift chain
+        let layer_0_vertices: std::collections::HashSet<u32> = graph.layer_fusion.as_ref().unwrap().layers[0]
+            .iter()
+            .map(|vertex| *vertex as u32)
+            .collect();
+        // 3 defect rounds × (1 defect + 3 flush) = 12 archives before R_final warmup.
+        // Plus 3 warmup archives = 15 total. But only 3 carry real data; the rest are empty.
+        // archiveDepth=16 is enough to hold everything.
+        let archive_depth = 16;
+        let (mut dual, mut primal, _graph, top_layer) = make_streaming_env_from_graph(graph, archive_depth);
+
+        // Fuse all layers at init
+        for layer_id in 0..num_layers {
+            dual.fuse_layer(layer_id as CompactLayerNum);
+            primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+        }
+
+        // --- 3 defect rounds, each followed by flush_rounds empty rounds ---
+        let defect_rounds = 3;
+        let mut node_offset = 0usize;
+        for round in 0..defect_rounds {
+            println!("\n  === R{round}: defects v24+v27 (nodes {node_offset},{}) ===", node_offset + 1);
+            streaming_round_verbose(
+                &mut dual, &mut primal, &[24, 27], node_offset, top_layer,
+                &format!("R{round}"), true,
+            );
+            let matchings = collect_outer_matchings(&primal);
+            assert_peer_pair(&matchings, node_offset as u32, (node_offset + 1) as u32);
+            node_offset += 2;
+
+            // Flush: empty rounds to shift data to L0 and clear live state
+            for f in 0..flush_rounds {
+                streaming_round_verbose(
+                    &mut dual, &mut primal, &[], node_offset, top_layer,
+                    &format!("R{round}_flush_{f}"), false,
+                );
+            }
+        }
+
+        // --- final warmup: ensure the last defect round's data reaches L0 ---
+        // (The flush rounds above already handle this for earlier rounds.
+        //  The last defect round's flush rounds bring its data to L0.)
+
+        // --- R_final: single defect at v27 triggers chain of archived conflicts ---
+        let final_node = node_offset; // = 6
+        println!("\n  === R_final: defect v27 (node {final_node}) ===");
+        dual.add_defect(ni!(27), ni!(final_node));
+        dual.fuse_layer(top_layer);
+        primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
+
+        let mut final_iterations = 0;
+        let mut archived_conflict_count = 0;
+        let (mut obstacle, grown) = dual.find_obstacle();
+        println!("  [R_final] initial obstacle: {} (grown={grown})", format_obstacle(&obstacle));
+        while !obstacle.is_none() {
+            if let CompactObstacle::Conflict { vertex_1, vertex_2, .. } = obstacle {
+                let v1 = vertex_1.get();
+                let v2 = vertex_2.get();
+                if layer_0_vertices.contains(&v1) || layer_0_vertices.contains(&v2) {
+                    archived_conflict_count += 1;
+                }
+            }
+            println!("  [R_final] iter {final_iterations}: resolving {}", format_obstacle(&obstacle));
+            primal.resolve(&mut *dual, obstacle);
+            let (next_obstacle, next_grown) = dual.find_obstacle();
+            obstacle = next_obstacle;
+            println!("  [R_final] iter {final_iterations}: after resolve → {} (grown={next_grown})", format_obstacle(&obstacle));
+            final_iterations += 1;
+            assert!(final_iterations < 2000, "R_final: solve loop stuck after {final_iterations} iterations");
+        }
+
+        let final_matchings = collect_outer_matchings(&primal);
+        println!("  [R_final] final matchings: {final_matchings:?}");
+        println!("  archived conflicts seen: {archived_conflict_count}");
+        assert!(
+            archived_conflict_count >= 1,
+            "expected at least 1 archived conflict; saw {archived_conflict_count}; matchings={final_matchings:?}"
+        );
+        assert!(!final_matchings.is_empty(), "no matchings produced");
+        println!("\n  === dual_module_looper_boundary7_multi_round_alternating_tree — PASS ===");
+    }
+
     /// Shortest hop count between two vertices (unweighted BFS on `weighted_edges`).
     fn graph_hop_distance(graph: &crate::resources::MicroBlossomSingle, start: usize, goal: usize) -> Option<usize> {
         use std::collections::VecDeque;

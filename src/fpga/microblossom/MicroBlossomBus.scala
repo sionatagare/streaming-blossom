@@ -938,6 +938,8 @@ class MicroBlossomBusGeneratorConf(arguments: Seq[String]) extends ScallopConf(a
       descr = s"insert register at select stages: ${Stages().stageNames.mkString(", ")}"
     )
   val clockDivideBy = opt[Double](default = Some(2))
+  /** Elastic `layers` BRAM depth per vertex (layer fusion / streaming). Must cover retained archive slices. */
+  val archiveDepth = opt[Int](default = Some(1))
   verify()
   def dualConfig = DualConfig(
     filename = graph(),
@@ -950,7 +952,8 @@ class MicroBlossomBusGeneratorConf(arguments: Seq[String]) extends ScallopConf(a
     supportOffloading = supportOffloading(),
     supportLayerFusion = supportLayerFusion(),
     supportLoadStallEmulator = supportLoadStallEmulator(),
-    injectRegisters = injectRegisters()
+    injectRegisters = injectRegisters(),
+    archiveDepth = archiveDepth()
   )
 }
 
