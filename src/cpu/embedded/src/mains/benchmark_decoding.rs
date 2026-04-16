@@ -3,7 +3,7 @@ use crate::defects_reader::*;
 use crate::dual_driver::*;
 use crate::util::*;
 use core::cell::UnsafeCell;
-use core::hint::black_box;
+use core::hint::{black_box, spin_loop};
 use include_bytes_plus::include_bytes;
 use konst::{option, primitive::parse_usize, result::unwrap_ctx};
 use micro_blossom_nostd::dual_driver_tracked::*;
@@ -142,6 +142,20 @@ pub fn main() {
                 CompactLayerId::new(top_layer_id as CompactLayerNum).unwrap(),
             );
 
+            // Hardware latency (same window as batch): native time from when the last fusion-layer
+            // syndrome is considered ready (`syndrome_finish`) until the FPGA latches decode done
+            // (`get_last_finish_time`). Batch reaches that edge via load-stall + per-layer loads; here
+            // we arm the same emulator schedule and wait until `syndrome_finish` before solving so the
+            // start timestamp matches. No `load_syndrome_external` in streaming, so we skip the
+            // `load_time >= syndrome_finish` assert used in batch.
+            let native_start = unsafe { extern_c::get_native_time() };
+            let syndrome_start = native_start + syndrome_start_delay_cycle;
+            let syndrome_finish = syndrome_start + finish_delta;
+            unsafe { extern_c::setup_load_stall_emulator(syndrome_start, interval, context_id) };
+            while unsafe { extern_c::get_native_time() } < syndrome_finish {
+                spin_loop();
+            }
+
             let fast_start = unsafe { extern_c::get_fast_cpu_time() };
 
             // Solve until no obstacle remains
@@ -151,6 +165,10 @@ pub fn main() {
                 (obstacle, _) = dual_module.find_obstacle();
             }
 
+            let finish_time = unsafe { extern_c::get_last_finish_time(context_id) };
+            let hardware_diff = unsafe { extern_c::diff_native_time(syndrome_finish, finish_time) } as f64;
+            latency_benchmarker.record(hardware_diff);
+
             // Archive: shifts layer state down, resets top layer for next measurement
             dual_module.archive_elastic_slice();
 
@@ -158,14 +176,22 @@ pub fn main() {
             let counter = unsafe { extern_c::get_instruction_counter() };
             if !DISABLE_DETAIL_PRINT {
                 println!(
-                    "[{}] counter: {counter}, wall: {:.3}us",
+                    "[{}] time: {:.3}us, counter: {counter}, wall: {:.3}us",
                     defects_reader.count,
+                    hardware_diff * 1e6,
                     cpu_wall_diff * 1e6
                 );
             }
             cpu_wall_benchmarker.record(cpu_wall_diff);
 
             streaming_node_offset += num_defects;
+            // `ni!(streaming_node_offset + i)` is a `u16` node id; reset before wrap on very long runs.
+            const MAX_STREAMING_NODE_OFFSET: usize = (u16::MAX - 4) as usize;
+            if streaming_node_offset > MAX_STREAMING_NODE_OFFSET.saturating_sub(128) {
+                primal_module.reset();
+                dual_module.reset();
+                streaming_node_offset = 0;
+            }
         } else {
             // Batch mode: load all defects, fuse layers one by one, full reset between samples
             for (node_index, &vertex_index) in defects.iter().enumerate() {
