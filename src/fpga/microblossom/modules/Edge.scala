@@ -442,8 +442,10 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   accConflict.vertex1.init(convergecastConflictBitsInit)
   accConflict.vertex2.init(convergecastConflictBitsInit)
 
-  // Reset accumulators when scan starts (full bundle assign; partial assign trips Spinal unassigned-Reg lint)
-  when(io.edgeScanActive && io.edgeScanIndex === 0) {
+  // Reset accumulators on the rising edge of scanActive (scan start).
+  // Cannot use edgeScanIndex===0 because reversed scan order makes index 0 the last tick.
+  val prevScanActive = RegNext(io.edgeScanActive, init = False)
+  when(io.edgeScanActive && !prevScanActive) {
     accMaxGrowable.length := accMaxGrowable.length.maxValue
     accConflict.valid := False
     accConflict.node1 := convergecastConflictBitsInit

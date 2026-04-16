@@ -1616,6 +1616,9 @@ mod tests {
         // (The flush rounds above already handle this for earlier rounds.
         //  The last defect round's flush rounds bring its data to L0.)
 
+        // --- Dump all archived entries for v0 and v3 before R_final ---
+        print_dual_vertex_columns(&dual, "pre_R_final", &[0, 3]);
+
         // --- R_final: single defect at v27 triggers chain of archived conflicts ---
         let final_node = node_offset; // = 6
         println!("\n  === R_final: defect v27 (node {final_node}) ===");
