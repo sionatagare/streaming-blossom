@@ -183,7 +183,9 @@ impl FusionVisualizer for DualModuleLooperDriver {
 mod tests {
     use super::*;
     use crate::dual_module_adaptor::tests::*;
+    use crate::dual_module_comb::{DualCombConfig, DualModuleComb, DualModuleCombDriver};
     use fusion_blossom::util::*;
+    use micro_blossom_nostd::interface::DualInterface;
     use serde_json::json;
 
     // to use visualization, we need the folder of fusion-blossom repo
@@ -592,7 +594,113 @@ mod tests {
         (dual, primal, graph, top_layer)
     }
 
-    fn archive_streaming_slice(dual: &mut DualModuleLooper) {
+    /// Like [`make_streaming_env_custom`](Self::make_streaming_env_custom), but uses a pre-built
+    /// [`MicroBlossomSingle`](MicroBlossomSingle) (e.g. custom weights from
+    /// [`MicroBlossomSingle::phenomenological_rotated_d3_boundary7_spatial1`](MicroBlossomSingle::phenomenological_rotated_d3_boundary7_spatial1)).
+    fn make_streaming_env_from_graph(
+        mut graph: MicroBlossomSingle,
+        archive_depth: usize,
+    ) -> (
+        Box<DualModuleLooper>,
+        Box<crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>>,
+        MicroBlossomSingle,
+        CompactLayerNum,
+    ) {
+        use crate::primal_module_embedded_adaptor::PrimalModuleEmbedded;
+        use micro_blossom_nostd::util::*;
+
+        graph.offloading = crate::resources::OffloadingFinder::new();
+
+        let test_name = format!(
+            "looper_correctness_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                % 100000
+        );
+        let config: DualLooperConfig = serde_json::from_value(json!({
+            "name": test_name,
+            "sim_config": {
+                "support_layer_fusion": true,
+                "archive_depth": archive_depth
+            }
+        }))
+        .unwrap();
+
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+        let top_layer = (num_layers - 1) as CompactLayerNum;
+
+        let dual: Box<DualModuleLooper> = stacker::grow(MAX_NODE_NUM * 256, || {
+            Box::new(DualModuleStackless::new(
+                DualDriverTracked::new(DualModuleLooperDriver::new(graph.clone(), config).unwrap()),
+            ))
+        });
+        let mut primal: Box<PrimalModuleEmbedded<MAX_NODE_NUM>> =
+            stacker::grow(MAX_NODE_NUM * 256, || Box::new(PrimalModuleEmbedded::new()));
+        primal.nodes.blossom_begin = graph.vertex_num;
+        if let Some(lf) = graph.layer_fusion.as_ref() {
+            for vertex_index in 0..graph.vertex_num {
+                if let Some(&layer_id) = lf.vertex_layer_id.get(&vertex_index) {
+                    primal.layer_fusion.vertex_layer_id[vertex_index] =
+                        CompactLayerId::new(layer_id as CompactLayerNum);
+                }
+            }
+        }
+
+        (dual, primal, graph, top_layer)
+    }
+
+    /// Same as [`make_streaming_env_from_graph`](Self::make_streaming_env_from_graph) but uses the
+    /// Rust combinatorial dual ([`DualModuleComb`](crate::dual_module_comb::DualModuleComb)) as a
+    /// reference for streaming + archive behaviour (no Scala / Verilator).
+    fn make_streaming_comb_from_graph(
+        mut graph: MicroBlossomSingle,
+        archive_depth: usize,
+    ) -> (
+        Box<DualModuleComb>,
+        Box<crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>>,
+        MicroBlossomSingle,
+        CompactLayerNum,
+    ) {
+        use crate::primal_module_embedded_adaptor::PrimalModuleEmbedded;
+        use micro_blossom_nostd::util::*;
+
+        graph.offloading = crate::resources::OffloadingFinder::new();
+
+        let config: DualCombConfig = serde_json::from_value(json!({
+            "sim_config": {
+                "support_layer_fusion": true,
+                "archive_depth": archive_depth
+            }
+        }))
+        .unwrap();
+
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+        let top_layer = (num_layers - 1) as CompactLayerNum;
+
+        let dual: Box<DualModuleComb> = stacker::grow(MAX_NODE_NUM * 256, || {
+            Box::new(DualModuleStackless::new(DualDriverTracked::new(DualModuleCombDriver::new(
+                graph.clone(),
+                config,
+            ))))
+        });
+        let mut primal: Box<PrimalModuleEmbedded<MAX_NODE_NUM>> =
+            stacker::grow(MAX_NODE_NUM * 256, || Box::new(PrimalModuleEmbedded::new()));
+        primal.nodes.blossom_begin = graph.vertex_num;
+        if let Some(lf) = graph.layer_fusion.as_ref() {
+            for vertex_index in 0..graph.vertex_num {
+                if let Some(&layer_id) = lf.vertex_layer_id.get(&vertex_index) {
+                    primal.layer_fusion.vertex_layer_id[vertex_index] =
+                        CompactLayerId::new(layer_id as CompactLayerNum);
+                }
+            }
+        }
+
+        (dual, primal, graph, top_layer)
+    }
+
+    fn archive_streaming_slice(dual: &mut impl DualInterface) {
         dual.archive_elastic_slice();
     }
 
@@ -628,7 +736,7 @@ mod tests {
 
     /// Helper: run one streaming round — add defects, fuse top layer, solve, archive.
     fn streaming_round(
-        dual: &mut DualModuleLooper,
+        dual: &mut impl DualInterface,
         primal: &mut crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
         defects: &[usize],
         node_offset: usize,
@@ -639,7 +747,7 @@ mod tests {
     }
 
     fn streaming_round_verbose(
-        dual: &mut DualModuleLooper,
+        dual: &mut impl DualInterface,
         primal: &mut crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
         defects: &[usize],
         node_offset: usize,
@@ -721,6 +829,46 @@ mod tests {
                     println!("    v{i}: node={:?} defect={defect}", node);
                 }
             }
+        }
+    }
+
+    fn print_dual_vertex_columns(dual: &DualModuleLooper, label: &str, vertex_indices: &[usize]) {
+        let snapshot = dual.driver.driver.snapshot(true);
+        let vertices = snapshot
+            .get("vertices")
+            .and_then(|value| value.as_array())
+            .expect("snapshot vertices");
+        println!("  [{label}] dual archived/live columns:");
+        for &vertex_index in vertex_indices {
+            let vertex = &vertices[vertex_index];
+            let node = vertex.get("p").and_then(|value| value.as_i64());
+            let root = vertex.get("pg").and_then(|value| value.as_i64());
+            let defect = vertex.get("s").and_then(|value| value.as_bool()).unwrap_or(false);
+            let archived = vertex
+                .get("a")
+                .and_then(|value| value.as_array())
+                .map(|states| {
+                    states
+                        .iter()
+                        .enumerate()
+                        .map(|(index, state)| {
+                            format!(
+                                "#{index}(node={:?},root={:?},grown={},speed={},virt={},defect={})",
+                                state.get("p").and_then(|value| value.as_i64()),
+                                state.get("pg").and_then(|value| value.as_i64()),
+                                state.get("g").and_then(|value| value.as_i64()).unwrap_or(-1),
+                                state.get("sp").and_then(|value| value.as_i64()).unwrap_or(-1),
+                                state.get("v").and_then(|value| value.as_bool()).unwrap_or(false),
+                                state.get("s").and_then(|value| value.as_bool()).unwrap_or(false),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                })
+                .unwrap_or_else(|| "(no archive)".to_string());
+            println!(
+                "    v{vertex_index}: live(node={node:?}, root={root:?}, defect={defect}) archived=[{archived}]"
+            );
         }
     }
 
@@ -1093,136 +1241,257 @@ mod tests {
         println!("\narchive-dependent matching test passed");
     }
 
-    /// `true` if `obstacle` is a conflict where some **real** endpoint lies on a fusion sheet
-    /// strictly **below** the live top (`layer_id < top_layer_id`), e.g. growth from the top
-    /// defect reached an interior vertex on an older time slice (elastic archive column).
-    fn conflict_touches_below_top_fusion_layer(
-        graph: &crate::resources::MicroBlossomSingle,
-        top_layer_id: usize,
-        obstacle: &CompactObstacle,
-    ) -> bool {
-        let Some(lf) = graph.layer_fusion.as_ref() else {
-            return false;
-        };
-        match obstacle {
-            CompactObstacle::Conflict { vertex_1, vertex_2, .. } => {
-                let a = vertex_1.get() as usize;
-                let b = vertex_2.get() as usize;
-                let la = lf.vertex_layer_id.get(&a).copied();
-                let lb = lf.vertex_layer_id.get(&b).copied();
-                la.map(|l| l < top_layer_id).unwrap_or(false)
-                    || lb.map(|l| l < top_layer_id).unwrap_or(false)
+    /// One-line summary of outer matched nodes after a streaming round (for `boundary7` test logs).
+    fn print_outer_matching_line(
+        primal: &crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
+        tag: &str,
+    ) {
+        let mut parts = Vec::new();
+        primal.nodes.iterate_intermediate_matching(|node, target, _link| {
+            parts.push(format!("n{}→{:?}", node.get(), target));
+        });
+        println!(
+            "  [summary {tag}] outer matchings ({}): {}",
+            parts.len(),
+            if parts.is_empty() {
+                "(none)".to_string()
+            } else {
+                parts.join(" | ")
             }
-            _ => false,
-        }
+        );
     }
 
-    /// Sub-top fusion contact, then **two** archive-advancing empties, then a fresh live-top decode.
+    fn collect_outer_matchings(
+        primal: &crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
+    ) -> Vec<(u32, CompactMatchTarget)> {
+        let mut matchings = Vec::new();
+        primal.nodes.iterate_intermediate_matching(|node, target, _link| {
+            matchings.push((node.get(), target));
+        });
+        matchings
+    }
+
+    fn assert_peer_pair(matchings: &[(u32, CompactMatchTarget)], node_a: u32, node_b: u32) {
+        assert!(
+            matchings.iter().any(|(node, target)| {
+                (*node == node_a && matches!(target, CompactMatchTarget::Peer(peer) if peer.get() == node_b))
+                    || (*node == node_b
+                        && matches!(target, CompactMatchTarget::Peer(peer) if peer.get() == node_a))
+            }),
+            "expected peer pair ({node_a}, {node_b}), got matchings={matchings:?}"
+        );
+    }
+
+    fn assert_virtual_matching(matchings: &[(u32, CompactMatchTarget)], node_index: u32) {
+        assert!(
+            matchings
+                .iter()
+                .any(|(node, target)| *node == node_index && matches!(target, CompactMatchTarget::VirtualVertex(_))),
+            "expected node {node_index} virtual-matched, got matchings={matchings:?}"
+        );
+    }
+
+    /// Custom-weight phenomenological d=3 graph ([`MicroBlossomSingle::phenomenological_rotated_d3_archive_v24_v27_then_v27`]):
+    /// base real-real edges **6**, boundary edges **12**, with a forced cheap path
+    /// `v24-v27` and `v27-v19-v11-v3`, plus expensive `v0-boundary` (250).
     ///
-    /// Uses `noisy_measurements = 3` → **four** fusion layers (with `noisy_measurements = 2` every
-    /// real vertex lies on the top time slice and typical conflicts never name a sub-top layer id).
+    /// **R0:** defects on top **v24** and **v27** (nodes 0 and 1), decode, archive.
     ///
-    /// **Seed:** one top defect — the first alternating-tree conflicts include a real vertex on a
-    /// fusion sheet **below** the live top (e.g. v24 vs v16 on phenomenological d=3).
+    /// **Warmup:** `num_layers - 1` empty streaming rounds (same pattern as hardware `warmupDone`),
+    /// each fuse → trivial solve → archive, so the v24/v27 state moves into the elastic archive.
     ///
-    /// **Warmup:** two empty streaming rounds (fuse → solve → archive each) advance the elastic
-    /// stack by two layer slices.
-    ///
-    /// **Challenge:** a new defect on the same top site (new node id) must still decode to
-    /// quiescence. After deep archive the first conflict may stay on the top sheet (e.g. v24–v26);
-    /// the sub-top geometry is asserted on the **seed** decode where the column is unambiguous.
+    /// **Final:** a single new defect on **v27** (node 2). For the current fused graph weights,
+    /// both the combinatorial dual and the Scala looper converge to the **same** optimum: keep the
+    /// archived `0↔1` peer and **virtual-match** live node `2` (see
+    /// [`dual_module_looper_boundary7_v24_v27_warmup_then_v27_comb_reference`](Self::dual_module_looper_boundary7_v24_v27_warmup_then_v27_comb_reference)).
     #[test]
-    fn dual_module_looper_alternating_tree_grows_into_two_layer_archive() {
-        // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_alternating_tree_grows_into_two_layer_archive -- --nocapture
+    fn dual_module_looper_boundary7_v24_v27_warmup_then_v27() {
+        // WITH_WAVEFORM=1 KEEP_RTL_FOLDER=1 cargo test dual_module_looper_boundary7_v24_v27_warmup_then_v27 -- --nocapture
+
         use micro_blossom_nostd::util::*;
 
-        let (mut dual, mut primal, graph, top_layer) = make_streaming_env_custom(3, 3, 8);
-        let lf = graph.layer_fusion.as_ref().unwrap();
-        let top_layer_id = lf.num_layers - 1;
-        assert!(
-            lf.num_layers >= 4,
-            "expected noisy_measurements=3 → at least four fusion layers so sub-top growth is observable"
-        );
-        let top_verts: Vec<usize> = lf.layers.last().unwrap().clone();
-        // Prefer v24 when present — same top corner as other archive tests (fusion column v24→v16…).
-        let v_top = if top_verts.contains(&24) {
-            24
-        } else {
-            *top_verts.first().expect("non-empty top layer")
-        };
+        let graph = MicroBlossomSingle::phenomenological_rotated_d3_archive_v24_v27_then_v27();
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+        let warmup_rounds = num_layers.saturating_sub(1);
+        let top_verts: Vec<usize> = graph.layer_fusion.as_ref().unwrap().layers.last().unwrap().clone();
+        let layer_0_vertices: std::collections::HashSet<u32> = graph.layer_fusion.as_ref().unwrap().layers[0]
+            .iter()
+            .map(|vertex| *vertex as u32)
+            .collect();
+        let (mut dual, mut primal, graph, top_layer) = make_streaming_env_from_graph(graph, 8);
 
-        let mut saw_below_top = false;
-
-        println!(
-            "\n=== Seed (d=3, {} layers): top defect v{v_top}, node 0 — expect sub-top fusion in conflicts ===",
-            lf.num_layers
-        );
-        dual.add_defect(ni!(v_top), ni!(0));
-        dual.fuse_layer(top_layer);
-        primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
-        let mut seed_iters = 0usize;
-        let (mut obstacle, grown) = dual.find_obstacle();
-        println!("  [seed] initial obstacle: {} (grown={grown})", format_obstacle(&obstacle));
-        while !obstacle.is_none() {
-            if conflict_touches_below_top_fusion_layer(&graph, top_layer_id, &obstacle) {
-                saw_below_top = true;
-                println!(
-                    "  [seed] iter {seed_iters}: below-top fusion touch — {}",
-                    format_obstacle(&obstacle)
-                );
-            }
-            primal.resolve(&mut *dual, obstacle);
-            (obstacle, _) = dual.find_obstacle();
-            seed_iters += 1;
-            assert!(seed_iters < 2000, "seed solve stuck after {seed_iters} iterations");
+        // Fuse all layers at init so layer vertices are non-virtual and can grow.
+        // Without this, v19/v11/v3 stay virtual (speed=0) and archived conflicts
+        // on fusion edges never trigger (live_grown stays 0).
+        for layer_id in 0..num_layers {
+            dual.fuse_layer(layer_id as CompactLayerNum);
+            primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
         }
+
         assert!(
-            saw_below_top,
-            "seed decode should hit a sub-top fusion vertex (e.g. v24 vs v16); top_layer_id={top_layer_id}"
+            graph.vertex_num > 27,
+            "graph must include v27 (vertex_num={})",
+            graph.vertex_num
         );
-        archive_streaming_slice(&mut *dual);
-        println!("  [seed] done in {seed_iters} resolve iters");
 
-        println!("\n=== Two empty rounds (archive-advance ×2) ===");
-        streaming_round_verbose(&mut dual, &mut primal, &[], 1, top_layer, "empty0", true);
-        streaming_round_verbose(&mut dual, &mut primal, &[], 1, top_layer, "empty1", true);
-
+        println!("\n{}", "=".repeat(72));
+        println!("  boundary7_v24_v27_warmup_then_v27 — graph setup");
+        println!("{}", "=".repeat(72));
         println!(
-            "\n=== Challenge: live-top defect v{v_top} (node 2) — must quiesce after two layer archives ==="
+            "  graph: phenomenological_rotated_d3_archive_v24_v27_then_v27 (vertex_num={}, archive_depth=8)",
+            graph.vertex_num
         );
-        dual.add_defect(ni!(v_top), ni!(2));
+        println!(
+            "  weights: base real-real = 20 | base boundary = 100 | cheap path: (27,19),(19,11),(11,3)=1 | (24,27)=120 | v0-boundary = 250 | v24-column edges to layer 0 = 200 | v24-v26 escape = 400 | direct v27 boundary edges = 300 | side exits off the 27-19-11-3 column = 400 | lateral real-real exits off that column = 400 | v27-v28 detour = 400 | (0,3)=200"
+        );
+        println!("  fusion: num_layers={num_layers}, top_layer id={top_layer}, top vertices {top_verts:?}");
+        println!(
+            "  plan: R0 syndromes v24+v27 (nodes 0,1) → {warmup_rounds}× empty fuse/solve/archive → final v27 (node 2)"
+        );
+        println!("{}\n", "=".repeat(72));
+
+        println!("{}", "=".repeat(72));
+        println!("  ROUND R0 — load 2 defects, fuse top layer, decode, archive");
+        println!("{}", "=".repeat(72));
+        println!("  syndromes: vertices [24, 27]  (decoder nodes 0 and 1)");
+        println!("  action: dual.add_defect ×2 → fuse_layer({top_layer}) → primal.fuse_layer → find_obstacle/resolve loop → archive_elastic_slice");
+        streaming_round_verbose(&mut dual, &mut primal, &[24, 27], 0, top_layer, "R0", true);
+        let r0_matchings = collect_outer_matchings(&primal);
+        assert_peer_pair(&r0_matchings, 0, 1);
+        print_outer_matching_line(&primal, "after R0");
+        println!();
+
+        println!("{}", "=".repeat(72));
+        println!("  WARMUP — {warmup_rounds} empty measurement rounds (elastic archive / chain shift)");
+        println!("{}", "=".repeat(72));
+        for i in 0..warmup_rounds {
+            println!(
+                "\n  --- warmup step {}/{}: no new defects (node_offset=2 for next ids) ---",
+                i + 1,
+                warmup_rounds
+            );
+            println!("  action: fuse_layer → (no obstacles expected) → archive_elastic_slice");
+            streaming_round_verbose(
+                &mut dual,
+                &mut primal,
+                &[],
+                2,
+                top_layer,
+                &format!("warmup_{i}"),
+                true,
+            );
+            print_outer_matching_line(&primal, &format!("after warmup_{i}"));
+        }
+        println!();
+
+        println!("{}", "=".repeat(72));
+        println!("  ROUND R_final — single new defect on live top v27");
+        println!("{}", "=".repeat(72));
+        println!("  syndrome: vertex [27]  (decoder node 2)");
+        println!("  action: manual fuse/solve to capture archived conflicts before the final archive");
+        print_dual_vertex_columns(&dual, "pre_R_final", &[0, 3, 16, 19]);
+        dual.add_defect(ni!(27), ni!(2));
         dual.fuse_layer(top_layer);
         primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
+        print_dual_vertex_columns(&dual, "R_final_after_fuse", &[0, 3, 16, 19]);
 
-        let mut challenge_iters = 0usize;
+        let mut final_iterations = 0;
+        let mut saw_archived_or_cross_layer_conflict = false;
         let (mut obstacle, grown) = dual.find_obstacle();
-        println!("  [challenge] initial obstacle: {} (grown={grown})", format_obstacle(&obstacle));
+        println!("  [R_final] initial obstacle: {} (grown={grown})", format_obstacle(&obstacle));
+        print_dual_vertex_columns(&dual, "R_final_after_find_obstacle", &[0, 3, 16, 19]);
         while !obstacle.is_none() {
-            if conflict_touches_below_top_fusion_layer(&graph, top_layer_id, &obstacle) {
-                println!(
-                    "  [challenge] iter {challenge_iters}: below-top fusion touch — {}",
-                    format_obstacle(&obstacle)
-                );
+            if let CompactObstacle::Conflict { vertex_1, vertex_2, .. } = obstacle {
+                let v1 = vertex_1.get();
+                let v2 = vertex_2.get();
+                if layer_0_vertices.contains(&v1) || layer_0_vertices.contains(&v2) {
+                    saw_archived_or_cross_layer_conflict = true;
+                }
             }
+            println!("  [R_final] iter {final_iterations}: resolving {}", format_obstacle(&obstacle));
             primal.resolve(&mut *dual, obstacle);
-            (obstacle, _) = dual.find_obstacle();
-            challenge_iters += 1;
-            assert!(
-                challenge_iters < 2000,
-                "challenge solve stuck after {challenge_iters} iterations"
+            let (next_obstacle, next_grown) = dual.find_obstacle();
+            obstacle = next_obstacle;
+            println!("  [R_final] iter {final_iterations}: after resolve → {} (grown={next_grown})", format_obstacle(&obstacle));
+            final_iterations += 1;
+            assert!(final_iterations < 2000, "R_final: solve loop stuck after {final_iterations} iterations");
+        }
+        let final_matchings = collect_outer_matchings(&primal);
+        println!("  [R_final] final matchings before archive: {final_matchings:?}");
+        print_dual_vertex_columns(&dual, "R_final_after_solve", &[0, 3, 16, 19]);
+        assert!(
+            saw_archived_or_cross_layer_conflict,
+            "expected final round to touch archived / layer-0 state before quiescing; final_matchings={final_matchings:?}"
+        );
+        print_outer_matching_line(&primal, "after R_final solve");
+        archive_streaming_slice(&mut dual);
+
+        println!("\n{}", "=".repeat(72));
+        println!("  FINAL primal state (all printed outer nodes)");
+        println!("{}", "=".repeat(72));
+        primal.nodes.iterate_intermediate_matching(|node, target, _link| {
+            let grow = primal.nodes.get_node(node).grow_state;
+            println!("  node {} (grow={:?}) → {:?}", node.get(), grow, target);
+        });
+
+        println!("\n{}", "=".repeat(72));
+        println!("  dual_module_looper_boundary7_v24_v27_warmup_then_v27 — PASS");
+        println!("{}\n", "=".repeat(72));
+    }
+
+    /// Reference optimum for [`dual_module_looper_boundary7_v24_v27_warmup_then_v27`](Self::dual_module_looper_boundary7_v24_v27_warmup_then_v27):
+    /// same graph and streaming steps using the **combinatorial** dual (no Scala). The looper
+    /// test asserts the **same** final matching pattern so any Scala / comb mismatch is caught in CI.
+    #[test]
+    fn dual_module_looper_boundary7_v24_v27_warmup_then_v27_comb_reference() {
+        use micro_blossom_nostd::util::*;
+
+        let graph = MicroBlossomSingle::phenomenological_rotated_d3_archive_v24_v27_then_v27();
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+        let warmup_rounds = num_layers.saturating_sub(1);
+
+        let (mut dual, mut primal, graph, top_layer) = make_streaming_comb_from_graph(graph, 8);
+
+        // Fuse all layers at init (same as hardware test)
+        for layer_id in 0..num_layers {
+            dual.fuse_layer(layer_id as CompactLayerNum);
+            primal.fuse_layer(&mut dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+        }
+
+        streaming_round_verbose(&mut dual, &mut primal, &[24, 27], 0, top_layer, "R0", false);
+        let r0_matchings = collect_outer_matchings(&primal);
+        assert_peer_pair(&r0_matchings, 0, 1);
+        for i in 0..warmup_rounds {
+            streaming_round_verbose(
+                &mut dual,
+                &mut primal,
+                &[],
+                2,
+                top_layer,
+                &format!("warmup_{i}"),
+                false,
             );
         }
 
-        assert!(
-            challenge_iters >= 1,
-            "expected at least one resolve step on the challenge decode, got {challenge_iters}"
-        );
+        dual.add_defect(ni!(27), ni!(2));
+        dual.fuse_layer(top_layer);
+        primal.fuse_layer(&mut dual, CompactLayerId::new(top_layer).unwrap());
 
-        archive_streaming_slice(&mut *dual);
-        println!(
-            "\ndual_module_looper_alternating_tree_grows_into_two_layer_archive passed \
-             (seed iters={seed_iters}, challenge iters={challenge_iters}, v_top={v_top})"
-        );
+        let mut final_iterations = 0;
+        let (mut obstacle, _) = dual.find_obstacle();
+        while !obstacle.is_none() {
+            primal.resolve(&mut dual, obstacle);
+            (obstacle, _) = dual.find_obstacle();
+            final_iterations += 1;
+            assert!(
+                final_iterations < 2000,
+                "comb reference: solve loop stuck after {final_iterations} iterations"
+            );
+        }
+
+        let final_matchings = collect_outer_matchings(&primal);
+        let all_nodes_matched = final_matchings.len() >= 2;
+        assert!(all_nodes_matched, "comb reference: not all nodes matched: {final_matchings:?}");
     }
 
     /// Shortest hop count between two vertices (unweighted BFS on `weighted_edges`).

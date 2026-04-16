@@ -37,6 +37,13 @@ case class DualConfig(
     assert(supportLayerFusion)
   }
 
+  /**
+    * When `supportLayerFusion` is on, same-L0 fusion vertical edges use **L0 live** grown/shadow on the upper endpoint and
+    * `RegNext(L0 archived …)` on the lower — parallel to archive-slice `k` vs `k−1` pairing (see `Edge.archivedGrownAt`).
+    * Only affects edges where `isFusionEdgeSameL0`.
+    */
+  def fusionElasticTightUsesLiveVsArchived0: Boolean = supportLayerFusion
+
   def vertexNum = graph.vertex_num.toInt
   def edgeNum = graph.weighted_edges.length.toInt
   def offloaderNum = activeOffloading.length.toInt

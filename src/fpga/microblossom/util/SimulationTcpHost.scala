@@ -67,7 +67,8 @@ case class SimulationConfig(
     val supportLayerFusion: Boolean,
     val supportLoadStallEmulator: Boolean,
     val injectRegisters: Seq[String],
-    val clockDivideBy: Double
+    val clockDivideBy: Double,
+    val archiveDepth: Int
 ) {
   def dualConfig = {
     val config = DualConfig(
@@ -81,7 +82,8 @@ case class SimulationConfig(
       supportOffloading = supportOffloading,
       supportLayerFusion = supportLayerFusion,
       supportLoadStallEmulator = supportLoadStallEmulator,
-      injectRegisters = injectRegisters
+      injectRegisters = injectRegisters,
+      archiveDepth = archiveDepth
     )
     config.sanityCheck()
     config
@@ -139,6 +141,7 @@ object SimulationConfig {
       case Left(ex)     => throw ex
     }
     val clockDivideBy = readNamedValue("clock_divide_by").toDouble
+    val archiveDepth = readNamedValue("archive_depth").toInt
     SimulationConfig(
       graph,
       withWaveform,
@@ -155,7 +158,8 @@ object SimulationConfig {
       supportLayerFusion,
       supportLoadStallEmulator,
       injectRegisters,
-      clockDivideBy
+      clockDivideBy,
+      archiveDepth
     )
   }
 }

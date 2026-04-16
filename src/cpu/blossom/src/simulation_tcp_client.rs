@@ -64,6 +64,9 @@ pub struct SimulationConfig {
     #[derivative(Default(value = "simulation_config_default::clock_divide_by()"))]
     #[serde(default = "simulation_config_default::clock_divide_by")]
     pub clock_divide_by: f64,
+    #[derivative(Default(value = "simulation_config_default::archive_depth()"))]
+    #[serde(default = "simulation_config_default::archive_depth")]
+    pub archive_depth: usize,
 }
 
 pub struct SimulationTcpClient {
@@ -317,6 +320,9 @@ pub mod simulation_config_default {
     }
     pub fn clock_divide_by() -> f64 {
         env_f64("CLOCK_DIVIDE_BY", 1.0)
+    }
+    pub fn archive_depth() -> usize {
+        env_usize("ARCHIVE_DEPTH", 1)
     }
 }
 

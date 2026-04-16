@@ -134,16 +134,32 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
 
   // For fusion edges: capture previous tick's archivedState from L0 counterpart (1-cycle delay).
   // The lower endpoint uses this captured value; the upper uses the current archivedState.
-  def archivedGrownAt(l0Elastic: Boolean, l0Input: => VertexState, liveInput: => UInt, isUpper: Boolean): UInt = {
-    if (!l0Elastic) liveInput
-    else if (!isFusionSameL0 || isUpper) l0Input.grown  // horizontal or upper endpoint: current
-    else RegNext(l0Input.grown)                          // lower endpoint of fusion: captured from previous tick
+  // When `supportLayerFusion` is on (`config.fusionElasticTightUsesLiveVsArchived0`): upper uses L0 **live** grown, lower RegNext(archived grown)
+  // — same stagger pattern as upper=current archived / lower=RegNext(archived) for archive-only fusion.
+  // `l0Archived` is call-by-name: `archivedState` only exists on elastic vertex bundles (`elastic generate`).
+  def archivedGrownAt(
+      l0Elastic: Boolean,
+      l0Archived: => VertexState,
+      l0LiveGrown: UInt,
+      graphEndpointLive: UInt,
+      isUpper: Boolean
+  ): UInt = {
+    if (!l0Elastic) graphEndpointLive
+    else if (config.fusionElasticTightUsesLiveVsArchived0 && isFusionSameL0) {
+      if (isUpper) l0LiveGrown
+      else RegNext(l0Archived.grown)
+    } else if (!isFusionSameL0 || isUpper) l0Archived.grown
+    else RegNext(l0Archived.grown)
   }
 
   val conditionedVertexIsVirtualArch = if (hasLayerFusion) {
     val conditionedVertex = config.edgeConditionedVertex(edgeIndex)
     val condL0 = config.layer0CounterpartOf(conditionedVertex)
-    if (config.vertexHasElasticLayers(condL0)) {
+    if (config.fusionElasticTightUsesLiveVsArchived0 && isFusionSameL0) {
+      // Live-vs-archived mode: use live isVirtual since the upper endpoint uses live state.
+      if (conditionedVertex == leftVertex) io.leftL0VertexInput.offloadGet.state.isVirtual
+      else io.rightL0VertexInput.offloadGet.state.isVirtual
+    } else if (config.vertexHasElasticLayers(condL0)) {
       if (conditionedVertex == leftVertex) io.leftL0VertexInput.offloadGet.archivedState.isVirtual
       else io.rightL0VertexInput.offloadGet.archivedState.isVirtual
     } else {
@@ -157,12 +173,14 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   val leftGrownOffloadLayers = archivedGrownAt(
     config.vertexHasElasticLayers(leftL0Vertex),
     io.leftL0VertexInput.offloadGet.archivedState,
+    io.leftL0VertexInput.offloadGet.state.grown,
     io.leftVertexInput.offloadGet.state.grown,
     leftIsUpper
   )
   val rightGrownOffloadLayers = archivedGrownAt(
     config.vertexHasElasticLayers(rightL0Vertex),
     io.rightL0VertexInput.offloadGet.archivedState,
+    io.rightL0VertexInput.offloadGet.state.grown,
     io.rightVertexInput.offloadGet.state.grown,
     rightIsUpper
   )
@@ -225,7 +243,10 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   val conditionedVertexIsVirtualExecuteArch = if (hasLayerFusion) {
     val conditionedVertex = config.edgeConditionedVertex(edgeIndex)
     val condL0 = config.layer0CounterpartOf(conditionedVertex)
-    if (config.vertexHasElasticLayers(condL0)) {
+    if (config.fusionElasticTightUsesLiveVsArchived0 && isFusionSameL0) {
+      if (conditionedVertex == leftVertex) io.leftL0VertexInput.executeGet2.state.isVirtual
+      else io.rightL0VertexInput.executeGet2.state.isVirtual
+    } else if (config.vertexHasElasticLayers(condL0)) {
       if (conditionedVertex == leftVertex) io.leftL0VertexInput.executeGet2.archivedState.isVirtual
       else io.rightL0VertexInput.executeGet2.archivedState.isVirtual
     } else {
@@ -239,12 +260,14 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   val leftGrownExecuteLayers = archivedGrownAt(
     config.vertexHasElasticLayers(leftL0Vertex),
     io.leftL0VertexInput.executeGet2.archivedState,
+    io.leftL0VertexInput.executeGet2.state.grown,
     io.leftVertexInput.executeGet2.state.grown,
     leftIsUpper
   )
   val rightGrownExecuteLayers = archivedGrownAt(
     config.vertexHasElasticLayers(rightL0Vertex),
     io.rightL0VertexInput.executeGet2.archivedState,
+    io.rightL0VertexInput.executeGet2.state.grown,
     io.rightVertexInput.executeGet2.state.grown,
     rightIsUpper
   )
@@ -284,12 +307,14 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   val leftGrownUpdateLayers = archivedGrownAt(
     config.vertexHasElasticLayers(leftL0Vertex),
     io.leftL0VertexInput.executeGet3.archivedState,
+    io.leftL0VertexInput.executeGet3.state.grown,
     io.leftVertexInput.executeGet3.state.grown,
     leftIsUpper
   )
   val rightGrownUpdateLayers = archivedGrownAt(
     config.vertexHasElasticLayers(rightL0Vertex),
     io.rightL0VertexInput.executeGet3.archivedState,
+    io.rightL0VertexInput.executeGet3.state.grown,
     io.rightVertexInput.executeGet3.state.grown,
     rightIsUpper
   )
@@ -336,25 +361,67 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   val leftL0Elastic = config.vertexHasElasticLayers(leftL0Vertex)
   val rightL0Elastic = config.vertexHasElasticLayers(rightL0Vertex)
 
-  def archivedShadowFor(l0Elastic: Boolean, l0Shadow: => VertexShadowResult, liveShadow: => VertexShadowResult, isUpper: Boolean): VertexShadowResult = {
-    if (!l0Elastic) liveShadow
-    else if (!isFusionSameL0 || isUpper) l0Shadow
-    else RegNext(l0Shadow)
+  // Archived fields are call-by-name — they are absent (null) on non-elastic vertex stage bundles.
+  def archivedShadowFor(
+      l0Elastic: Boolean,
+      l0ArchivedShadow: => VertexShadowResult,
+      l0LiveShadow: => VertexShadowResult,
+      liveEndpointShadow: => VertexShadowResult,
+      isUpper: Boolean
+  ): VertexShadowResult = {
+    if (!l0Elastic) liveEndpointShadow
+    else if (config.fusionElasticTightUsesLiveVsArchived0 && isFusionSameL0) {
+      if (isUpper) l0LiveShadow
+      else RegNext(l0ArchivedShadow)
+    } else if (!isFusionSameL0 || isUpper) l0ArchivedShadow
+    else RegNext(l0ArchivedShadow)
   }
-  def archivedIsVirtualFor(l0Elastic: Boolean, l0IsVirtual: => Bool, liveIsVirtual: => Bool, isUpper: Boolean): Bool = {
-    if (!l0Elastic) liveIsVirtual
-    else if (!isFusionSameL0 || isUpper) l0IsVirtual
-    else RegNext(l0IsVirtual)
+  def archivedIsVirtualFor(
+      l0Elastic: Boolean,
+      l0ArchivedVirtual: => Bool,
+      l0LiveVirtual: => Bool,
+      liveEndpointVirtual: => Bool,
+      isUpper: Boolean
+  ): Bool = {
+    if (!l0Elastic) liveEndpointVirtual
+    else if (config.fusionElasticTightUsesLiveVsArchived0 && isFusionSameL0) {
+      // For the upper (live) endpoint: force True so EdgeResponse's isAvailable check
+      // returns false. Without this, a free live vertex (node=IndexNone, non-virtual)
+      // suppresses archived conflicts, causing the Looper to hang at Grow(0).
+      if (isUpper) True
+      else RegNext(l0ArchivedVirtual)
+    } else if (!isFusionSameL0 || isUpper) l0ArchivedVirtual
+    else RegNext(l0ArchivedVirtual)
   }
 
-  archivedEdgeResponse.io.leftShadow := archivedShadowFor(leftL0Elastic,
-    io.leftL0VertexInput.updateGet3.archivedShadow, io.leftVertexInput.updateGet3.shadow, leftIsUpper)
-  archivedEdgeResponse.io.rightShadow := archivedShadowFor(rightL0Elastic,
-    io.rightL0VertexInput.updateGet3.archivedShadow, io.rightVertexInput.updateGet3.shadow, rightIsUpper)
-  archivedEdgeResponse.io.leftIsVirtual := archivedIsVirtualFor(leftL0Elastic,
-    io.leftL0VertexInput.updateGet3.archivedState.isVirtual, io.leftVertexInput.updateGet3.state.isVirtual, leftIsUpper)
-  archivedEdgeResponse.io.rightIsVirtual := archivedIsVirtualFor(rightL0Elastic,
-    io.rightL0VertexInput.updateGet3.archivedState.isVirtual, io.rightVertexInput.updateGet3.state.isVirtual, rightIsUpper)
+  archivedEdgeResponse.io.leftShadow := archivedShadowFor(
+    leftL0Elastic,
+    io.leftL0VertexInput.updateGet3.archivedShadow,
+    io.leftL0VertexInput.updateGet3.shadow,
+    io.leftVertexInput.updateGet3.shadow,
+    leftIsUpper
+  )
+  archivedEdgeResponse.io.rightShadow := archivedShadowFor(
+    rightL0Elastic,
+    io.rightL0VertexInput.updateGet3.archivedShadow,
+    io.rightL0VertexInput.updateGet3.shadow,
+    io.rightVertexInput.updateGet3.shadow,
+    rightIsUpper
+  )
+  archivedEdgeResponse.io.leftIsVirtual := archivedIsVirtualFor(
+    leftL0Elastic,
+    io.leftL0VertexInput.updateGet3.archivedState.isVirtual,
+    io.leftL0VertexInput.updateGet3.state.isVirtual,
+    io.leftVertexInput.updateGet3.state.isVirtual,
+    leftIsUpper
+  )
+  archivedEdgeResponse.io.rightIsVirtual := archivedIsVirtualFor(
+    rightL0Elastic,
+    io.rightL0VertexInput.updateGet3.archivedState.isVirtual,
+    io.rightL0VertexInput.updateGet3.state.isVirtual,
+    io.rightVertexInput.updateGet3.state.isVirtual,
+    rightIsUpper
+  )
   archivedEdgeResponse.io.leftVertex := leftVertex
   archivedEdgeResponse.io.rightVertex := rightVertex
   archivedEdgeResponse.io.remaining := stages.updateGet3.remainingVsElasticLayers
@@ -404,7 +471,12 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
       scanIndexPipelined === U(addr, config.archiveAddressBits bits)
     ).reduce(_ || _)
 
-    when(scanFeedingPipelined && addressRelevant) {
+    // For fusion-same-L0 edges, the lower endpoint is delayed by RegNext (1 tick).
+    // The archivedEdgeResponse result for entry i arrives at tick i+1.
+    // Match the feeding gate to this delay so the accumulation fires at the correct tick.
+    val effectiveFeedingPipelined = if (isFusionSameL0) RegNext(scanFeedingPipelined, init = False) else scanFeedingPipelined
+
+    when(effectiveFeedingPipelined && addressRelevant) {
       when(archivedEdgeResponse.io.maxGrowable.length < accMaxGrowable.length) {
         accMaxGrowable := archivedEdgeResponse.io.maxGrowable
       }

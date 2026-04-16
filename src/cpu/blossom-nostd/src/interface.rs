@@ -135,6 +135,41 @@ pub trait DualInterface {
     fn archive_elastic_slice(&mut self);
 }
 
+#[cfg(feature = "std")]
+impl<T: DualInterface + ?Sized> DualInterface for std::boxed::Box<T> {
+    fn reset(&mut self) {
+        (**self).reset()
+    }
+
+    fn create_blossom(&mut self, primal_module: &impl PrimalInterface, blossom_index: CompactNodeIndex) {
+        (**self).create_blossom(primal_module, blossom_index)
+    }
+
+    fn expand_blossom(&mut self, primal_module: &impl PrimalInterface, blossom_index: CompactNodeIndex) {
+        (**self).expand_blossom(primal_module, blossom_index)
+    }
+
+    fn set_speed(&mut self, is_blossom: bool, node_index: CompactNodeIndex, grow_state: CompactGrowState) {
+        (**self).set_speed(is_blossom, node_index, grow_state)
+    }
+
+    fn find_obstacle(&mut self) -> (CompactObstacle, CompactWeight) {
+        (**self).find_obstacle()
+    }
+
+    fn add_defect(&mut self, vertex: CompactVertexIndex, node: CompactNodeIndex) {
+        (**self).add_defect(vertex, node)
+    }
+
+    fn fuse_layer(&mut self, layer_id: CompactLayerNum) {
+        (**self).fuse_layer(layer_id)
+    }
+
+    fn archive_elastic_slice(&mut self) {
+        (**self).archive_elastic_slice()
+    }
+}
+
 impl CompactObstacle {
     pub fn is_obstacle(&self) -> bool {
         !(matches!(self, Self::None) || matches!(self, Self::GrowLength { .. }))

@@ -148,7 +148,9 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
 
     // State machine registers
     val scanActive = Reg(Bool()) init False
-    val scanTickWidth = config.archiveAddressBits + log2Up(config.executeLatency + 1) + 1
+    // Fusion-same-L0 edges add 1 tick (RegNext on lower endpoint in archivedEdgeResponse)
+    val fusionExtra = if (config.fusionElasticTightUsesLiveVsArchived0) 1 else 0
+    val scanTickWidth = config.archiveAddressBits + log2Up(config.executeLatency + fusionExtra + 1) + 1
     val scanTick = Reg(UInt(scanTickWidth bits)) init 0
 
     val isArchiveSlice =
@@ -192,8 +194,8 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       scanTick := 0
     }
 
-    // Edge scan: feed archiveValidCount indices, then drain executeLatency-1 cycles
-    val scanEndTick = archiveValidCount.resize(scanTickWidth) + U((config.executeLatency - 1) max 0, scanTickWidth bits)
+    // Edge scan: feed archiveValidCount indices, then drain for pipeline + fusion delay.
+    val scanEndTick = archiveValidCount.resize(scanTickWidth) + U(((config.executeLatency + fusionExtra - 1) max 0), scanTickWidth bits)
     when(scanActive) {
       when(scanTick === scanEndTick) {
         scanActive := False
@@ -317,9 +319,10 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     io.message.instruction #= instruction
     clockDomain.waitSampling()
     io.message.valid #= false
-    // scan: archiveDepth + executeLatency - 1 cycles (no separate mirror walk)
+    // scan: archiveDepth + executeLatency + fusionExtra - 1 cycles (no separate mirror walk)
+    val fusionExtraSim = if (config.fusionElasticTightUsesLiveVsArchived0) 1 else 0
     val elasticArchiveSimExtra =
-      if (firstLayerVertexIndices.nonEmpty) config.archiveDepth + config.executeLatency - 1
+      if (firstLayerVertexIndices.nonEmpty) config.archiveDepth + config.executeLatency + fusionExtraSim - 1
       else 0
     val simTail = config.readLatency - 1 + elasticArchiveSimExtra
     for (idx <- 0 until simTail) { clockDomain.waitSampling() }
@@ -400,6 +403,35 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
   def simSnapshot(abbrev: Boolean = true): Json = {
     // https://circe.github.io/circe/api/io/circe/JsonObject.html
     var jsonVertices = ArrayBuffer[Json]()
+    def vertexStateJson(state: VertexState): Json = {
+      var stateMap = Map(
+        (if (abbrev) { "v" }
+         else { "is_virtual" }) -> Json.fromBoolean(state.isVirtual.toBoolean),
+        (if (abbrev) { "s" }
+         else { "is_defect" }) -> Json.fromBoolean(state.isDefect.toBoolean),
+        (if (abbrev) { "g" }
+         else { "grown" }) -> Json.fromLong(state.grown.toLong),
+        (if (abbrev) { "sp" }
+         else { "speed" }) -> Json.fromLong(state.speed.toLong)
+      )
+      val node = state.node.toLong
+      if (node != config.IndexNone) {
+        stateMap += ((
+          if (abbrev) { "p" }
+          else { "propagated_dual_node" },
+          Json.fromLong(node)
+        ))
+      }
+      val root = state.root.toLong
+      if (root != config.IndexNone) {
+        stateMap += ((
+          if (abbrev) { "pg" }
+          else { "propagated_grandson_dual_node" },
+          Json.fromLong(root)
+        ))
+      }
+      Json.fromFields(stateMap)
+    }
     vertices.foreach(vertex => {
       val register = vertex.register
       val vertexMap = Map(
@@ -422,6 +454,13 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
           if (abbrev) { "pg" }
           else { "propagated_grandson_dual_node" },
           Json.fromLong(root)
+        ))
+      }
+      if (vertex.elastic) {
+        vertexMap += ((
+          if (abbrev) { "a" }
+          else { "archived_states" },
+          Json.fromValues(vertex.archivedRegs.map(vertexStateJson))
         ))
       }
       jsonVertices.append(Json.fromFields(vertexMap))

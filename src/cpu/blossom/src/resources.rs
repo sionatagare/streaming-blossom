@@ -159,6 +159,109 @@ impl MicroBlossomSingle {
         Self::new(&initializer, &positions)
     }
 
+    /// Phenomenological rotated **distance 3** graph (`noisy_measurements = 3`, same topology as
+    /// `example_phenomenological_rotated_d3.json`) with custom **integer** weights:
+    /// - **10** on every edge incident to a **virtual** (boundary) vertex  
+    /// - **1** on every other spatial or temporal edge whose **both** endpoints are **real**  
+    /// - **9** on the real–real edges **v0–v3** and **v24–v27** (overrides the default **1**)  
+    ///
+    /// The struct is rebuilt with [`Self::new`](MicroBlossomSingle::new) so `vertex_max_growth`
+    /// and offloading match the new weights.
+    pub fn phenomenological_rotated_d3_boundary7_spatial1() -> Self {
+        let code = PhenomenologicalRotatedCode::new(3, 3, 0.1, 500);
+        let mut graph = Self::new_code(&code);
+        let virtual_set: std::collections::HashSet<usize> =
+            graph.virtual_vertices.iter().copied().collect();
+        for edge in graph.weighted_edges.iter_mut() {
+            let touches_virtual = virtual_set.contains(&edge.l) || virtual_set.contains(&edge.r);
+            edge.w = if touches_virtual { 10 } else { 1 };
+        }
+        for edge in graph.weighted_edges.iter_mut() {
+            let v0_v3 = (edge.l == 0 && edge.r == 3) || (edge.l == 3 && edge.r == 0);
+            let v24_v27 = (edge.l == 24 && edge.r == 27) || (edge.l == 27 && edge.r == 24);
+            if v0_v3 || v24_v27 {
+                edge.w = 9;
+            }
+        }
+        let initializer = graph.get_initializer();
+        Self::new(&initializer, &graph.get_positions())
+    }
+
+    /// Phenomenological rotated **distance 3** graph (`noisy_measurements = 3`) with weights chosen
+    /// to force this archive rematching story:
+    /// - round 0: top defects `v24` and `v27` pair with each other
+    /// - final round after warmup (with current weights): the fused optimum keeps archived `0↔1`
+    ///   and virtual-matches the new live defect (node `2`); see comb reference test in
+    ///   `dual_module_looper.rs` for the locked regression behaviour.
+    ///
+    /// Base weights:
+    /// - every real-real edge: **20**
+    /// - every virtual-incident edge: **100**
+    ///
+    /// Special low-cost path:
+    /// - `v24-v27`: **120** (cheap round-0 `0↔1` top pairing; the fused three-defect optimum after
+    ///   warmup is **not** always the narrative `0→boundary` + `1↔2` rematch — see comb reference
+    ///   test in `dual_module_looper.rs`, which locks the actual optimum for regression.)
+    /// - `v24-v16-v8-v0`: **200** per edge so a fresh `v27` defect does not quickly spill onto
+    ///   the live `v24/v0` column before it interacts with the archived `v27/v3` column
+    /// - direct `v27` boundary edges: **300** so the live defect prefers the `v27-v19-v11-v3`
+    ///   column instead of immediately escaping to the top boundary
+    /// - side-boundary exits from that column (`v19-v17/v21`, `v11-v9/v13`, `v3-v1/v5`):
+    ///   **400** so the final-round defect keeps descending until it hits the archived layer-0 site
+    /// - lateral real-real exits from that column (`v19-v16/v20`, `v11-v8/v12`, `v3-v4`):
+    ///   **400** so the live tree does not peel into neighboring columns before the archive rematch
+    /// - `v27-v28`: **400** so the live defect cannot sidestep into the neighboring top column
+    /// - `v24-v26`: **400** so the cheap `v24-v27` round-0 pairing does not become a final-round
+    ///   escape to the adjacent top boundary
+    /// - `v27-v19-v11-v3`: **1** per edge
+    /// - `v0-boundary`: **60** so reaching layer 0 is not an immediate cheaper escape than
+    ///   rematching through the archived pair
+    ///
+    /// Special expensive competitor:
+    /// - `v0-v3`: **200**
+    pub fn phenomenological_rotated_d3_archive_v24_v27_then_v27() -> Self {
+        let code = PhenomenologicalRotatedCode::new(3, 3, 0.1, 500);
+        let mut graph = Self::new_code(&code);
+        let virtual_set: std::collections::HashSet<usize> =
+            graph.virtual_vertices.iter().copied().collect();
+        for edge in graph.weighted_edges.iter_mut() {
+            let touches_virtual = virtual_set.contains(&edge.l) || virtual_set.contains(&edge.r);
+            edge.w = if touches_virtual { 100 } else { 20 };
+        }
+        for edge in graph.weighted_edges.iter_mut() {
+            let endpoints = (edge.l, edge.r);
+            edge.w = match endpoints {
+                (0, 2) | (2, 0) => 250,
+                (0, 3) | (3, 0) => 200,
+                (0, 8) | (8, 0) => 200,
+                (3, 4) | (4, 3) => 400,
+                (3, 11) | (11, 3) => 1,
+                (8, 16) | (16, 8) => 200,
+                (8, 11) | (11, 8) => 400,
+                (11, 12) | (12, 11) => 400,
+                (16, 24) | (24, 16) => 200,
+                (16, 19) | (19, 16) => 400,
+                (11, 19) | (19, 11) => 1,
+                (19, 20) | (20, 19) => 400,
+                (19, 27) | (27, 19) => 1,
+                (24, 26) | (26, 24) => 400,
+                (1, 3) | (3, 1) => 400,
+                (3, 5) | (5, 3) => 400,
+                (9, 11) | (11, 9) => 400,
+                (11, 13) | (13, 11) => 400,
+                (17, 19) | (19, 17) => 400,
+                (19, 21) | (21, 19) => 400,
+                (27, 28) | (28, 27) => 400,
+                (25, 27) | (27, 25) => 300,
+                (27, 29) | (29, 27) => 300,
+                (24, 27) | (27, 24) => 120,
+                _ => edge.w,
+            };
+        }
+        let initializer = graph.get_initializer();
+        Self::new(&initializer, &graph.get_positions())
+    }
+
     /// warning: do not use this for production because it doesn't contain useful position information
     /// to ease timing when placing on the hardware; only use this for behavior simulation
     pub fn new_initializer_only(initializer: &SolverInitializer) -> Self {
