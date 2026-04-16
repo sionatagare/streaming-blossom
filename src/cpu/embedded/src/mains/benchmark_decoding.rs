@@ -301,6 +301,8 @@ pub fn main() {
     println!("evaluation duration: {all_duration}s (running the benchmark)");
     let overall_duration = unsafe { extern_c::diff_native_time(0, all_end_native_time) };
     println!("overall duration: {overall_duration}s (from FPGA boot to program end)");
+    // Lets host `get_ttyoutput` stop as soon as the benchmark finishes (default exit_word `[exit]`).
+    println!("[exit]");
 }
 
 pub fn test_fast_timer() {
