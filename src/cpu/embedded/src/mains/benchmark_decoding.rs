@@ -142,12 +142,10 @@ pub fn main() {
                 CompactLayerId::new(top_layer_id as CompactLayerNum).unwrap(),
             );
 
-            // Hardware latency (same window as batch): native time from when the last fusion-layer
-            // syndrome is considered ready (`syndrome_finish`) until the FPGA latches decode done
-            // (`get_last_finish_time`). Batch reaches that edge via load-stall + per-layer loads; here
-            // we arm the same emulator schedule and wait until `syndrome_finish` before solving so the
-            // start timestamp matches. No `load_syndrome_external` in streaming, so we skip the
-            // `load_time >= syndrome_finish` assert used in batch.
+            // Native latency from when the last fusion-layer syndrome is considered ready
+            // (`syndrome_finish`, same construction as batch) until **after** `archive_elastic_slice`
+            // returns (so decode + archive are included). Batch still ends at `get_last_finish_time`;
+            // streaming uses `get_native_time` at the end because archive does not update that latch.
             let native_start = unsafe { extern_c::get_native_time() };
             let syndrome_start = native_start + syndrome_start_delay_cycle;
             let syndrome_finish = syndrome_start + finish_delta;
@@ -165,12 +163,13 @@ pub fn main() {
                 (obstacle, _) = dual_module.find_obstacle();
             }
 
-            let finish_time = unsafe { extern_c::get_last_finish_time(context_id) };
-            let hardware_diff = unsafe { extern_c::diff_native_time(syndrome_finish, finish_time) } as f64;
-            latency_benchmarker.record(hardware_diff);
-
             // Archive: shifts layer state down, resets top layer for next measurement
             dual_module.archive_elastic_slice();
+
+            let native_after_archive = unsafe { extern_c::get_native_time() };
+            let hardware_diff =
+                unsafe { extern_c::diff_native_time(syndrome_finish, native_after_archive) } as f64;
+            latency_benchmarker.record(hardware_diff);
 
             let cpu_wall_diff = (unsafe { extern_c::get_fast_cpu_duration_ns(fast_start) } as f64) * 1e-9;
             let counter = unsafe { extern_c::get_instruction_counter() };
