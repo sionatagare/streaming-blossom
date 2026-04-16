@@ -174,6 +174,8 @@ class MicroBlossomAxi4Builder:
     support_load_stall_emulator: bool = False
     # e.g. ["offload"], ["offload", "update3"]
     inject_registers: list[str] | str = field(default_factory=lambda: [])
+    # DualConfig elastic archive BRAM depth; None → env ARCHIVE_DEPTH (default 1). Streaming needs this large enough.
+    archive_depth: int | None = None
 
     # not none after
     project_builder: MicroBlossomProjectBuilder | None = None
@@ -215,6 +217,11 @@ class MicroBlossomAxi4Builder:
             parameters += ["--support-layer-fusion"]
         if self.support_load_stall_emulator:
             parameters += ["--support-load-stall-emulator"]
+        archive_depth = self.archive_depth
+        if archive_depth is None:
+            archive_depth = int(os.environ.get("ARCHIVE_DEPTH", "1"))
+        assert archive_depth >= 1, "archive_depth must be >= 1"
+        parameters += ["--archive-depth", str(archive_depth)]
         inject_registers = self.inject_registers
         if isinstance(inject_registers, str):
             inject_registers = [e for e in self.inject_registers.split(",") if e != ""]

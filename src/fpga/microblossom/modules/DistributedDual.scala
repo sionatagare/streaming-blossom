@@ -1398,32 +1398,24 @@ class MultiLayerArchiveTest extends AnyFunSuite {
     println("edgeLayerOf test passed")
   }
 
-  test("archiveScanAddressesOf distributes correctly") {
+  test("archiveScanAddressesOf returns all addresses") {
     val (config, _) = ArchiveTestFixtures.archiveTestConfig(archiveDepth = 12)
-    // 4 layers, archiveDepth=12
-    // Layer 0: 0, 4, 8
-    assert(config.archiveScanAddressesOf(0) == Seq(0, 4, 8))
-    // Layer 1: 1, 5, 9
-    assert(config.archiveScanAddressesOf(1) == Seq(1, 5, 9))
-    // Layer 2: 2, 6, 10
-    assert(config.archiveScanAddressesOf(2) == Seq(2, 6, 10))
-    // Layer 3: 3, 7, 11
-    assert(config.archiveScanAddressesOf(3) == Seq(3, 7, 11))
+    // BRAM layout is sequential (elastic shift brings all data to layer 0 before commit).
+    // All entries must be checked regardless of edge layer.
+    assert(config.archiveScanAddressesOf(0) == (0 until 12))
+    assert(config.archiveScanAddressesOf(1) == (0 until 12))
+    assert(config.archiveScanAddressesOf(2) == (0 until 12))
+    assert(config.archiveScanAddressesOf(3) == (0 until 12))
     println("archiveScanAddressesOf test passed")
   }
 
-  test("archiveScanAddressesOf with non-multiple depth") {
+  test("archiveScanAddressesOf with smaller depth") {
     val (config, _) = ArchiveTestFixtures.archiveTestConfig(archiveDepth = 6)
-    // 4 layers, archiveDepth=6
-    // Layer 0: 0, 4
-    assert(config.archiveScanAddressesOf(0) == Seq(0, 4))
-    // Layer 1: 1, 5
-    assert(config.archiveScanAddressesOf(1) == Seq(1, 5))
-    // Layer 2: 2
-    assert(config.archiveScanAddressesOf(2) == Seq(2))
-    // Layer 3: 3
-    assert(config.archiveScanAddressesOf(3) == Seq(3))
-    println("archiveScanAddressesOf non-multiple test passed")
+    assert(config.archiveScanAddressesOf(0) == (0 until 6))
+    assert(config.archiveScanAddressesOf(1) == (0 until 6))
+    assert(config.archiveScanAddressesOf(2) == (0 until 6))
+    assert(config.archiveScanAddressesOf(3) == (0 until 6))
+    println("archiveScanAddressesOf smaller depth test passed")
   }
 
   // ---------- Archive register file tests ----------
@@ -2465,22 +2457,15 @@ class MultiLayerArchiveTest extends AnyFunSuite {
   }
 
   test("edge layer assignment is consistent with scan addresses") {
-    // Verify that for each edge, its layer and scan addresses are self-consistent:
-    // all scan addresses mod numLayers == edgeLayer
+    // Verify that for each edge, scan addresses cover all BRAM entries (sequential layout).
     val (config, _) = ArchiveTestFixtures.archiveTestConfig(archiveDepth = 20)
     for (edgeIndex <- 0 until config.edgeNum) {
       config.edgeLayerOf(edgeIndex) match {
         case Some(layer) =>
           val addrs = config.archiveScanAddressesOf(layer)
-          for (addr <- addrs) {
-            assert(addr % config.numLayers == layer,
-              s"edge $edgeIndex layer=$layer addr=$addr: $addr mod ${config.numLayers} != $layer")
-          }
-          // Verify addresses are in range
-          for (addr <- addrs) {
-            assert(addr < config.archiveDepth,
-              s"edge $edgeIndex addr=$addr >= archiveDepth=${config.archiveDepth}")
-          }
+          // All addresses should be 0..archiveDepth-1 (sequential layout)
+          assert(addrs == (0 until config.archiveDepth),
+            s"edge $edgeIndex layer=$layer: expected sequential addresses, got $addrs")
         case None => // no layer, no addresses — ok
       }
     }

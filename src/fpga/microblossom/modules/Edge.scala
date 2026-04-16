@@ -427,14 +427,8 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   archivedEdgeResponse.io.remaining := stages.updateGet3.remainingVsElasticLayers
 
   // Accumulation registers for scan results.
-  // Fusion edges with same L0 counterpart accumulate at scanIndex+1 (they capture the lower endpoint
-  // on tick i, then compute when the upper endpoint arrives on tick i+1).
   val edgeLayer = config.edgeLayerOf(edgeIndex)
-  val scanAddresses = if (isFusionSameL0) {
-    edgeLayer.map(l => config.archiveScanAddressesOf(l).map(_ + 1)).getOrElse(Seq())
-  } else {
-    edgeLayer.map(l => config.archiveScanAddressesOf(l)).getOrElse(Seq())
-  }
+  val scanAddresses = edgeLayer.map(l => config.archiveScanAddressesOf(l)).getOrElse(Seq())
 
   val accMaxGrowable = Reg(ConvergecastMaxGrowable(config.weightBits))
   accMaxGrowable.length.init(accMaxGrowable.length.maxValue)
@@ -463,18 +457,18 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
   // Accumulate during scan: check if current scan index is relevant to this edge's layer
   if (scanAddresses.nonEmpty) {
     // Pipeline delay: scan index fed at offload, result arrives at updateGet3 after executeLatency cycles.
-    // Track the scan index through the pipeline to know which address produced the current result.
     val scanIndexPipelined = Delay(io.edgeScanIndex, config.executeLatency)
     val scanFeedingPipelined = Delay(io.edgeScanFeeding, config.executeLatency)
 
-    val addressRelevant = scanAddresses.map(addr =>
-      scanIndexPipelined === U(addr, config.archiveAddressBits bits)
-    ).reduce(_ || _)
-
     // For fusion-same-L0 edges, the lower endpoint is delayed by RegNext (1 tick).
-    // The archivedEdgeResponse result for entry i arrives at tick i+1.
-    // Match the feeding gate to this delay so the accumulation fires at the correct tick.
+    // The result for entry i arrives at tick i+1. Delay both the feeding gate and the
+    // index so the accumulation fires at the correct tick with the correct address.
+    val effectiveIndexPipelined = if (isFusionSameL0) RegNext(scanIndexPipelined) else scanIndexPipelined
     val effectiveFeedingPipelined = if (isFusionSameL0) RegNext(scanFeedingPipelined, init = False) else scanFeedingPipelined
+
+    val addressRelevant = scanAddresses.map(addr =>
+      effectiveIndexPipelined === U(addr, config.archiveAddressBits bits)
+    ).reduce(_ || _)
 
     when(effectiveFeedingPipelined && addressRelevant) {
       when(archivedEdgeResponse.io.maxGrowable.length < accMaxGrowable.length) {
