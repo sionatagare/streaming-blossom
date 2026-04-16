@@ -225,8 +225,14 @@ class BenchmarkDecodingResult:
                 latency = TimeDistribution.from_line(line)
             if line.startswith("cpu_wall_benchmarker<lower>"):
                 cpu_wall = TimeDistribution.from_line(line)
-        assert latency is not None
-        assert cpu_wall is not None
+        if latency is None or cpu_wall is None:
+            tail = "\n".join(lines[-40:])
+            raise ValueError(
+                "TTY capture is missing latency_benchmarker and/or cpu_wall_benchmarker lines.\n"
+                "Common causes: (1) get_ttyoutput idle timeout while firmware hung or ran longer "
+                "than silence window; (2) serial/garbled output; (3) crash before final println.\n"
+                f"Last lines of TTY:\n{tail}"
+            )
         return BenchmarkDecodingResult(latency=latency, cpu_wall=cpu_wall)
 
     def __add__(self, other: "BenchmarkDecodingResult") -> "BenchmarkDecodingResult":
