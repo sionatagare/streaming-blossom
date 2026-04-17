@@ -18,7 +18,7 @@ SAMPLES = 1_00_000  # final
 # 100k rounds with one finite BRAM); it must be large enough that the archive pipeline never runs out
 # of commit slots for your graph + streaming pattern (see DistributedDual). Too small → hang in
 # `find_obstacle`. Larger → more FPGA RAM. Override: `export ARCHIVE_DEPTH=256`.
-STREAMING_DEFAULT_ARCHIVE_DEPTH = 128
+STREAMING_DEFAULT_ARCHIVE_DEPTH = 1024
 
 if os.environ.get("USE_STREAMING") and "ARCHIVE_DEPTH" not in os.environ:
     os.environ["ARCHIVE_DEPTH"] = str(STREAMING_DEFAULT_ARCHIVE_DEPTH)
@@ -35,6 +35,8 @@ if __name__ == "__main__":
                 p=p,
                 samples=SAMPLES,
                 use_layer_fusion=True,
+                # Per-sample println saturates UART and corrupts lines; keep summary-only output.
+                enable_detailed_print=False,
             )
             result = benchmarker.run()
             latency_vec.append(result.latency)

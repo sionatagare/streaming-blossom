@@ -38,6 +38,7 @@ class Configuration(OptimizableConfiguration):
     def get_project(self, frequency: int | None = None) -> MicroBlossomAxi4Builder:
         if frequency is None:
             frequency = self.frequency
+        archive_depth = int(os.environ.get("ARCHIVE_DEPTH", "128"))
         return MicroBlossomAxi4Builder(
             graph_builder=self.get_graph_builder(),
             name=self.name() + f"_f{frequency}",
@@ -47,6 +48,7 @@ class Configuration(OptimizableConfiguration):
             support_offloading=True,
             support_layer_fusion=True,
             support_load_stall_emulator=True,
+            archive_depth=archive_depth,
         )
 
 

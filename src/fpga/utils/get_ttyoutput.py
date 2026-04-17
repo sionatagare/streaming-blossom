@@ -5,6 +5,21 @@ import time
 import subprocess
 
 
+def _post_firmware_idle_sec(session_timeout: float) -> float:
+    """
+    After we see firmware output, we still use an idle timeout so a hung UART
+    does not block forever. The old fixed 30s was too short for decoding sweeps
+    (quiet stretches, or serial backpressure). Scale with the caller's session
+    timeout and allow an env override on servers without redeploying code.
+
+    Env: TTY_POST_FIRMWARE_IDLE_SEC — idle seconds after firmware starts (float, min 30).
+    """
+    if "TTY_POST_FIRMWARE_IDLE_SEC" in os.environ:
+        return max(30.0, float(os.environ["TTY_POST_FIRMWARE_IDLE_SEC"]))
+    # e.g. session_timeout=3600 -> 900s cap, 120s floor
+    return float(min(900.0, max(120.0, session_timeout / 3.0)))
+
+
 script_dir = os.path.dirname(os.path.abspath(__file__))
 default_ttyfile = os.path.join(script_dir, "ttymicroblossom")
 
@@ -38,12 +53,15 @@ def get_ttyoutput(
                 print(content, end="")
             if content != "":
                 last = time.time()
-                # Detect firmware output (past bootloader) to enable shorter idle timeout
+                # Past long silent PLM/boot: once firmware prints, use a separate idle budget.
                 if not seen_firmware_output and "start of build parameters" in content:
                     seen_firmware_output = True
             tty_output += content.strip("\x00")
-            # Use shorter idle timeout (30s) once firmware has started printing
-            effective_timeout = 30 if seen_firmware_output else timeout
+            effective_timeout = (
+                _post_firmware_idle_sec(float(timeout))
+                if seen_firmware_output
+                else float(timeout)
+            )
             if time.time() - last > effective_timeout:
                 print(f"[warning] ttyoutput timeouted after {effective_timeout}s")
                 break
