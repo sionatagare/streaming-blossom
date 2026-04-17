@@ -37,7 +37,11 @@ def get_ttyoutput(
             if time.time() - last > timeout:
                 print(f"[warning] ttyoutput timeouted after {timeout}s")
                 break
-            if exit_word in tty_output:
+            if isinstance(exit_word, str):
+                exit_words = [exit_word]
+            else:
+                exit_words = exit_word
+            if any(w in tty_output for w in exit_words):
                 break
     if command != "":
         child.wait()
