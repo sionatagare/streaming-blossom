@@ -18,20 +18,27 @@ class TimeDistribution:
     @staticmethod
     def from_line(line: str) -> "TimeDistribution":
         # example: "<lower>1.000e-9<upper>1.000e0<N>2000[666]1[695]23[696]80[698]7[699]3[underflow]0[overflow]0"
-        match = re.search(
-            "<lower>([\+-e\d\.]+)<upper>([\+-e\d\.]+)<N>(\d+)((?:\[\d+\]\d+)*)\[underflow\](\d+)\[overflow\](\d+)",
+        # Parse header (lower, upper, N)
+        header = re.search(
+            r"<lower>([\+-e\d\.]+)<upper>([\+-e\d\.]+)<N>(\d+)",
             line,
         )
-        lower = float(match.group(1))
-        upper = float(match.group(2))
-        N = int(match.group(3))
+        if header is None:
+            raise ValueError(f"Cannot parse benchmarker header from line: {line!r}")
+        lower = float(header.group(1))
+        upper = float(header.group(2))
+        N = int(header.group(3))
+        # Parse bucket entries [index]count — tolerant of garbled chars between entries
         counter = {}
-        if match.group(4) != "":
-            for ele in match.group(4)[1:].split("["):
-                index, count = ele.split("]")
-                counter[int(index)] = int(count)
-        underflow_count = int(match.group(5))
-        overflow_count = int(match.group(6))
+        for m in re.finditer(r"\[(\d+)\](\d+)", line[header.end():]):
+            key, val = int(m.group(1)), int(m.group(2))
+            if key < N:  # skip [underflow] and [overflow] parsed as numbers
+                counter[key] = val
+        # Parse underflow/overflow
+        uf = re.search(r"\[underflow\](\d+)", line)
+        of = re.search(r"\[overflow\](\d+)", line)
+        underflow_count = int(uf.group(1)) if uf else 0
+        overflow_count = int(of.group(1)) if of else 0
         return TimeDistribution(
             lower=lower,
             upper=upper,
@@ -225,6 +232,12 @@ class BenchmarkDecodingResult:
         benchmarker_re = re.compile(
             r"<lower>([\+-e\d\.]+)<upper>([\+-e\d\.]+)<N>(\d+)"
         )
+        def try_parse(line: str):
+            try:
+                return TimeDistribution.from_line(line)
+            except (ValueError, AttributeError):
+                return None
+
         matches = []
         lines = tty_output.split("\n")
         for line in lines:
@@ -234,20 +247,20 @@ class BenchmarkDecodingResult:
         # Try name-based assignment first
         for line in matches:
             if "cpu_wall" in line and cpu_wall is None:
-                cpu_wall = TimeDistribution.from_line(line)
+                cpu_wall = try_parse(line)
             elif "latency" in line and "cpu_wall" not in line and latency is None:
-                latency = TimeDistribution.from_line(line)
+                latency = try_parse(line)
         # Fall back to print order for unassigned slots
         unassigned = [m for m in matches if m not in
                       ([l for l in matches if "cpu_wall" in l] +
                        [l for l in matches if "latency" in l and "cpu_wall" not in l])]
         if cpu_wall is None and latency is None and len(unassigned) >= 2:
-            cpu_wall = TimeDistribution.from_line(unassigned[0])
-            latency = TimeDistribution.from_line(unassigned[1])
+            cpu_wall = try_parse(unassigned[0])
+            latency = try_parse(unassigned[1])
         elif cpu_wall is None and latency is not None and len(unassigned) >= 1:
-            cpu_wall = TimeDistribution.from_line(unassigned[0])
+            cpu_wall = try_parse(unassigned[0])
         elif latency is None and cpu_wall is not None and len(unassigned) >= 1:
-            latency = TimeDistribution.from_line(unassigned[0])
+            latency = try_parse(unassigned[0])
         # If only one line survived and it's identifiable, use it for both
         if latency is not None and cpu_wall is None:
             print("[warning] cpu_wall_benchmarker line lost to serial corruption; duplicating latency as placeholder")
