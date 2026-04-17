@@ -32,6 +32,10 @@ make -C ../../fpga/Xilinx/VMK180_Micro_Blossom run_a72
 
 // guarantees decoding up to d=39
 pub const MAX_NODE_NUM: usize = unwrap_ctx!(parse_usize(option::unwrap_or!(option_env!("MAX_NODE_NUM"), "65536")));
+const MAX_STREAMING_NODE_OFFSET: usize = MAX_NODE_NUM - 256;
+/// Reset when archive BRAM is full. Reads the same ARCHIVE_DEPTH used at RTL synthesis time.
+const ARCHIVE_DEPTH: usize =
+    unwrap_ctx!(parse_usize(option::unwrap_or!(option_env!("ARCHIVE_DEPTH"), "128")));
 pub const DEFECTS: &'static [u32] = &include_bytes!("./embedded.defects" as u32le);
 
 /// by default using batch decoding
@@ -118,6 +122,7 @@ pub fn main() {
     // the top layer id for streaming mode: defects are always loaded on the top layer
     let top_layer_id = if USE_STREAMING { NUM_LAYER_FUSION - 1 } else { 0 };
     let mut streaming_node_offset: usize = 0;
+    let mut streaming_round_count: usize = 0;
 
     while let Some(defects) = defects_reader.next() {
         if IGNORE_EMPTY_DEFECT && defects.is_empty() {
@@ -184,12 +189,13 @@ pub fn main() {
             cpu_wall_benchmarker.record(cpu_wall_diff);
 
             streaming_node_offset += num_defects;
-            // `ni!(streaming_node_offset + i)` is a `u16` node id; reset before wrap on very long runs.
-            const MAX_STREAMING_NODE_OFFSET: usize = (u16::MAX - 4) as usize;
-            if streaming_node_offset > MAX_STREAMING_NODE_OFFSET.saturating_sub(128) {
+            streaming_round_count += 1;
+            // Reset when archive BRAM is full or node IDs are about to overflow.
+            if streaming_round_count >= ARCHIVE_DEPTH || streaming_node_offset > MAX_STREAMING_NODE_OFFSET {
                 primal_module.reset();
                 dual_module.reset();
                 streaming_node_offset = 0;
+                streaming_round_count = 0;
             }
         } else {
             // Batch mode: load all defects, fuse layers one by one, full reset between samples
