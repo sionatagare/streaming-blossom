@@ -268,6 +268,33 @@ class BenchmarkDecodingResult:
         elif cpu_wall is not None and latency is None:
             print("[warning] latency_benchmarker line lost to serial corruption; duplicating cpu_wall as placeholder")
             latency = cpu_wall
+        # Last resort: parse "average latency" from statistics lines.
+        # The statistics survive UART corruption more often than the compact lines.
+        # Firmware prints cpu_wall statistics first, then latency statistics.
+        if latency is None or cpu_wall is None:
+            avg_re = re.compile(r"average latency:\s*([\d.eE+-]+)s")
+            stats_sections = re.split(r"(?:cpu_wall|latency)_benchmarker statistics:", tty_output)
+            avg_values = []
+            for section in stats_sections:
+                m = avg_re.search(section)
+                if m:
+                    avg_values.append(float(m.group(1)))
+            if len(avg_values) >= 2:
+                print(f"[warning] using average latency from statistics lines: cpu_wall={avg_values[0]:.3e}, latency={avg_values[1]:.3e}")
+                if cpu_wall is None:
+                    cpu_wall = TimeDistribution()
+                    cpu_wall.record(avg_values[0], 1)
+                if latency is None:
+                    latency = TimeDistribution()
+                    latency.record(avg_values[1], 1)
+            elif len(avg_values) == 1:
+                print(f"[warning] only one average latency found from statistics: {avg_values[0]:.3e}")
+                td = TimeDistribution()
+                td.record(avg_values[0], 1)
+                if cpu_wall is None:
+                    cpu_wall = td
+                if latency is None:
+                    latency = td
         if latency is None or cpu_wall is None:
             tail = "\n".join(lines[-40:])
             raise ValueError(
