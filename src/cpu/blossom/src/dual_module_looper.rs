@@ -1856,4 +1856,66 @@ mod tests {
             },
         )
     }
+
+    /// Verify that periodic reset after archive BRAM fills works correctly.
+    ///
+    /// Uses `archive_depth=4` so the archive fills after 4 rounds. Runs 20 rounds total
+    /// with a reset every 4 rounds (mimicking `benchmark_decoding.rs` streaming logic).
+    /// Verifies the decoder doesn't hang and produces valid matchings after each reset.
+    ///
+    /// ```sh
+    /// cargo test dual_module_looper_streaming_archive_reset -- --nocapture
+    /// ```
+    #[test]
+    fn dual_module_looper_streaming_archive_reset() {
+        use micro_blossom_nostd::util::*;
+
+        let graph = MicroBlossomSingle::phenomenological_rotated_d3_archive_v24_v27_then_v27();
+        let archive_depth = 4;
+        let total_rounds = 20;
+        let (mut dual, mut primal, _graph, top_layer) = make_streaming_env_from_graph(graph, archive_depth);
+
+        // Fuse all layers at init
+        let num_layers = _graph.layer_fusion.as_ref().unwrap().num_layers;
+        for layer_id in 0..num_layers {
+            dual.fuse_layer(layer_id as CompactLayerNum);
+            primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+        }
+
+        let mut node_offset = 0usize;
+        let mut rounds_since_reset = 0usize;
+        let mut reset_count = 0usize;
+
+        for round in 0..total_rounds {
+            // Alternate between defect rounds (v24+v27) and empty rounds
+            let defects: &[usize] = if round % 2 == 0 { &[24, 27] } else { &[] };
+
+            streaming_round(
+                &mut dual, &mut primal, defects, node_offset, top_layer,
+                &format!("R{round}"),
+            );
+            node_offset += defects.len();
+            rounds_since_reset += 1;
+
+            // Reset when archive is full, just like benchmark_decoding.rs
+            if rounds_since_reset >= archive_depth {
+                println!("  [round {round}] resetting (archive full after {rounds_since_reset} rounds)");
+                primal.reset();
+                dual.reset();
+                node_offset = 0;
+                rounds_since_reset = 0;
+                reset_count += 1;
+
+                // Re-fuse layers after reset (same as firmware cold start)
+                for layer_id in 0..num_layers {
+                    dual.fuse_layer(layer_id as CompactLayerNum);
+                    primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+                }
+            }
+        }
+
+        assert!(reset_count >= 2, "expected at least 2 resets; got {reset_count}");
+        println!("\n  === dual_module_looper_streaming_archive_reset — PASS ===");
+        println!("  {total_rounds} rounds, archive_depth={archive_depth}, {reset_count} resets");
+    }
 }
