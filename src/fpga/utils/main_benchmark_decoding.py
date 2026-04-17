@@ -218,19 +218,38 @@ class BenchmarkDecodingResult:
     def from_tty_output(tty_output: str) -> "BenchmarkDecodingResult":
         latency = None
         cpu_wall = None
+        # Compact benchmarker lines may have garbled prefixes due to serial corruption.
+        # Firmware prints cpu_wall first, then latency (benchmark_decoding.rs lines 290-293).
+        # Match any line containing the <lower>...<upper>...<N> pattern and use the
+        # (possibly partial) name prefix or print order to assign them.
+        benchmarker_re = re.compile(
+            r"<lower>([\+-e\d\.]+)<upper>([\+-e\d\.]+)<N>(\d+)"
+        )
+        matches = []
         lines = tty_output.split("\n")
         for line in lines:
             line = line.strip("\r\n ")
-            if line.startswith("latency_benchmarker<lower>"):
-                latency = TimeDistribution.from_line(line)
-            if line.startswith("cpu_wall_benchmarker<lower>"):
-                cpu_wall = TimeDistribution.from_line(line)
+            if benchmarker_re.search(line):
+                matches.append(line)
+        if len(matches) >= 2:
+            # Try name-based assignment first; fall back to print order
+            for line in matches:
+                if "cpu_wall" in line and cpu_wall is None:
+                    cpu_wall = TimeDistribution.from_line(line)
+                elif "latency" in line and "cpu_wall" not in line and latency is None:
+                    latency = TimeDistribution.from_line(line)
+            if cpu_wall is None or latency is None:
+                # Names garbled beyond recognition — use print order
+                cpu_wall = TimeDistribution.from_line(matches[0])
+                latency = TimeDistribution.from_line(matches[1])
         if latency is None or cpu_wall is None:
             tail = "\n".join(lines[-40:])
             raise ValueError(
-                "TTY capture is missing latency_benchmarker and/or cpu_wall_benchmarker lines.\n"
-                "Common causes: (1) get_ttyoutput idle timeout while firmware hung or ran longer "
-                "than silence window; (2) serial/garbled output; (3) crash before final println.\n"
+                "TTY capture is missing lines starting with "
+                "'latency_benchmarker<lower>' and/or 'cpu_wall_benchmarker<lower>'.\n"
+                "Common causes: (1) stale tmp-tty cache from an aborted/timeout run — delete "
+                "circuit_level_fusion/tmp-tty/ and retry; (2) get_ttyoutput idle timeout (hang); "
+                "(3) serial corruption.\n"
                 f"Last lines of TTY:\n{tail}"
             )
         return BenchmarkDecodingResult(latency=latency, cpu_wall=cpu_wall)
@@ -287,10 +306,19 @@ class DecodingSpeedBenchmarkerBasic:
     # PLM Boot Time takes very long: may take 1 hour, just wait for it.
     def run(self, timeout: int = 3600, silent: bool = False) -> BenchmarkDecodingResult:
         # if result is already there, do not need to run again
-        if os.path.exists(self.tty_result_path()):
-            print(f"reuse existing {self.tty_result_path()}")
-            with open(self.tty_result_path(), "r", encoding="utf8") as f:
-                return BenchmarkDecodingResult.from_tty_output(f.read())
+        tty_path = self.tty_result_path()
+        if os.path.exists(tty_path):
+            print(f"reuse existing {tty_path}")
+            with open(tty_path, "r", encoding="utf8") as f:
+                cached_tty = f.read()
+            try:
+                return BenchmarkDecodingResult.from_tty_output(cached_tty)
+            except ValueError as exc:
+                print(
+                    f"[warning] cached TTY is unreadable ({exc}); deleting and re-running board.\n"
+                    f"  {tty_path}"
+                )
+                os.remove(tty_path)
         # copy the defects to the folder
         defects_file_path = self.generate_defects()
         dest_file_path = os.path.join(embedded_dir, "embedded.defects")
