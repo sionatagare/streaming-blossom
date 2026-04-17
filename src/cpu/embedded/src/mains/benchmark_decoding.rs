@@ -288,22 +288,49 @@ pub fn main() {
                 break;
             }
         }
-        // Sparse progress line to keep TTY session alive without flooding UART
+        // print something every 5s
         let native_now = unsafe { extern_c::get_native_time() };
         if unsafe { extern_c::diff_native_time(last_native_time, native_now) } > 5. {
-            println!("[info] {}", defects_reader.count);
+            println!("[info] have run {} samples", defects_reader.count);
             last_native_time = native_now;
+            println!("latency_benchmarker statistics:");
+            latency_benchmarker.print_statistics();
         }
     }
-    // Minimal output to avoid UART TX FIFO overflow at 115200 baud.
-    // Only print what the host parser actually needs.
+    // Wait for UART TX to drain before printing results.
+    let uart_drain = |ms: u64| {
+        let cycles = unsafe { (ms as f32 * 1e-3 * extern_c::get_native_frequency()) as u64 };
+        let start = unsafe { extern_c::get_native_time() };
+        while unsafe { extern_c::get_native_time() } < start + cycles {
+            spin_loop();
+        }
+    };
+    uart_drain(200);
+    // print out results
+    if !DISABLE_DETAIL_PRINT {
+        cpu_wall_benchmarker.debug_println();
+        uart_drain(100);
+        latency_benchmarker.debug_println();
+        uart_drain(100);
+    }
     print!("cpu_wall_benchmarker");
     cpu_wall_benchmarker.println();
+    uart_drain(100);
     print!("latency_benchmarker");
     latency_benchmarker.println();
+    uart_drain(100);
+    println!("cpu_wall_benchmarker statistics:");
+    cpu_wall_benchmarker.print_statistics();
+    uart_drain(100);
+    println!("latency_benchmarker statistics:");
+    latency_benchmarker.print_statistics();
+    uart_drain(100);
     let all_end_native_time = unsafe { extern_c::get_native_time() };
+    let all_duration = unsafe { extern_c::diff_native_time(all_begin_native_time, all_end_native_time) };
+    println!("evaluation duration: {all_duration}s (running the benchmark)");
     let overall_duration = unsafe { extern_c::diff_native_time(0, all_end_native_time) };
     println!("overall duration: {overall_duration}s (from FPGA boot to program end)");
+    uart_drain(100);
     println!("[exit]");
 }
 
