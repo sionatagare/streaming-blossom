@@ -20,12 +20,17 @@ def get_ttyoutput(
 ):
     tty_output = ""
     command_output = ""
+    if isinstance(exit_word, str):
+        exit_words = [exit_word]
+    else:
+        exit_words = list(exit_word)
     with open(filename, "r") as file:
         file.seek(0, 2)  # seek to the end
         if command != "":
             stdout = subprocess.PIPE if silent else sys.stdout
             child = subprocess.Popen(command, shell=shell, cwd=cwd, stdout=stdout)
         last = time.time()
+        seen_firmware_output = False
         while True:
             time.sleep(0.1)
             content = file.read()
@@ -33,14 +38,15 @@ def get_ttyoutput(
                 print(content, end="")
             if content != "":
                 last = time.time()
+                # Detect firmware output (past bootloader) to enable shorter idle timeout
+                if not seen_firmware_output and "start of build parameters" in content:
+                    seen_firmware_output = True
             tty_output += content.strip("\x00")
-            if time.time() - last > timeout:
-                print(f"[warning] ttyoutput timeouted after {timeout}s")
+            # Use shorter idle timeout (30s) once firmware has started printing
+            effective_timeout = 30 if seen_firmware_output else timeout
+            if time.time() - last > effective_timeout:
+                print(f"[warning] ttyoutput timeouted after {effective_timeout}s")
                 break
-            if isinstance(exit_word, str):
-                exit_words = [exit_word]
-            else:
-                exit_words = exit_word
             if any(w in tty_output for w in exit_words):
                 break
     if command != "":
