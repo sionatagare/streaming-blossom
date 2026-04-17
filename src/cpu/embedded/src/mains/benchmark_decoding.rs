@@ -197,6 +197,15 @@ pub fn main() {
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
             }
+            // With DISABLE_DETAIL_PRINT there is otherwise no per-round UART; a hung `find_obstacle`
+            // on one sample looks like "d=3 but 15min silence" on the host. Sparse lines keep the
+            // TTY session alive and show progress for small codes that should finish quickly.
+            if DISABLE_DETAIL_PRINT && defects_reader.count % 10_000 == 0 {
+                println!(
+                    "[info_streaming] samples_complete={} archive_rounds={}",
+                    defects_reader.count, streaming_round_count
+                );
+            }
         } else {
             // Batch mode: load all defects, fuse layers one by one, full reset between samples
             for (node_index, &vertex_index) in defects.iter().enumerate() {

@@ -1918,4 +1918,103 @@ mod tests {
         println!("\n  === dual_module_looper_streaming_archive_reset — PASS ===");
         println!("  {total_rounds} rounds, archive_depth={archive_depth}, {reset_count} resets");
     }
+
+    /// Stress test: streaming decode with random defects at varying error rates,
+    /// mimicking the `run.py` benchmark sweep. Uses seeded RNG to select random
+    /// top-layer vertices as defects each round, with periodic resets when the
+    /// archive fills (same logic as `benchmark_decoding.rs`).
+    ///
+    /// This catches solver hangs that only manifest with specific defect patterns
+    /// at higher error rates (e.g. the p≈2.5e-4 hang seen on hardware).
+    ///
+    /// ```sh
+    /// cargo test dual_module_looper_streaming_random_defects -- --nocapture
+    /// ```
+    #[test]
+    fn dual_module_looper_streaming_random_defects() {
+        use micro_blossom_nostd::util::*;
+        use rand_xoshiro::rand_core::{RngCore, SeedableRng};
+        use rand_xoshiro::Xoshiro256StarStar;
+
+        let archive_depth = 8;
+        let rounds_per_p = 50;
+        // Test multiple error rates including the problematic range
+        let p_values = [0.0001, 0.00025, 0.001, 0.005, 0.01];
+
+        let graph_path = format!(
+            "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let json_str = std::fs::read_to_string(&graph_path)
+            .unwrap_or_else(|e| panic!("read graph {graph_path}: {e}"));
+        let graph: MicroBlossomSingle = serde_json::from_str(&json_str).expect("parse graph");
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+
+        // Collect top-layer vertices
+        let top_layer_id = num_layers - 1;
+        let top_vertices: Vec<usize> = graph.layer_fusion.as_ref().unwrap().layers[top_layer_id]
+            .iter()
+            .map(|&v| v)
+            .collect();
+        assert!(!top_vertices.is_empty(), "no top-layer vertices found");
+
+        for &p in &p_values {
+            println!("\n  === p={p:.1e}, {rounds_per_p} rounds, archive_depth={archive_depth} ===");
+
+            let (mut dual, mut primal, _graph, top_layer) =
+                make_streaming_env_from_graph(graph.clone(), archive_depth);
+
+            // Fuse all layers at init
+            for layer_id in 0..num_layers {
+                dual.fuse_layer(layer_id as CompactLayerNum);
+                primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+            }
+
+            let mut rng = Xoshiro256StarStar::seed_from_u64((p * 1e9) as u64);
+            let mut node_offset = 0usize;
+            let mut rounds_since_reset = 0usize;
+            let mut reset_count = 0usize;
+            let mut total_defects = 0usize;
+
+            for round in 0..rounds_per_p {
+                // Generate random defects: each top-layer vertex is a defect with probability p
+                // Scale p up since d=3 graph has few vertices and low p would rarely produce defects
+                let effective_p = f64::min(p * 100.0, 0.5); // scale for test visibility
+                let defects: Vec<usize> = top_vertices.iter()
+                    .filter(|_| (rng.next_u32() as f64 / u32::MAX as f64) < effective_p)
+                    .copied()
+                    .collect();
+
+                streaming_round(
+                    &mut dual, &mut primal, &defects, node_offset, top_layer,
+                    &format!("p{p:.0e}_R{round}"),
+                );
+                node_offset += defects.len();
+                total_defects += defects.len();
+                rounds_since_reset += 1;
+
+                // Reset when archive is full, same as benchmark_decoding.rs
+                if rounds_since_reset >= archive_depth
+                    || node_offset > MAX_NODE_NUM - 256
+                {
+                    primal.reset();
+                    dual.reset();
+                    node_offset = 0;
+                    rounds_since_reset = 0;
+                    reset_count += 1;
+
+                    for layer_id in 0..num_layers {
+                        dual.fuse_layer(layer_id as CompactLayerNum);
+                        primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+                    }
+                }
+            }
+
+            println!(
+                "  p={p:.1e}: {rounds_per_p} rounds, {total_defects} total defects, {reset_count} resets — PASS"
+            );
+        }
+
+        println!("\n  === dual_module_looper_streaming_random_defects — ALL PASS ===");
+    }
 }
