@@ -238,12 +238,20 @@ class BenchmarkDecodingResult:
             except (ValueError, AttributeError):
                 return None
 
+        # Also match lines where <lower>/<upper> are garbled but <N> and bucket data survive.
+        # The defaults are always lower=1e-9, upper=1.0, N=2000.
+        partial_re = re.compile(r"<N>(\d+)(\[\d+\]\d+)")
         matches = []
         lines = tty_output.split("\n")
         for line in lines:
             line = line.strip("\r\n ")
             if benchmarker_re.search(line):
                 matches.append(line)
+            elif partial_re.search(line) and "[underflow]" in line:
+                # Reconstruct with default header so from_line can parse it
+                m = partial_re.search(line)
+                reconstructed = f"<lower>1.000e-9<upper>1.000e0{line[m.start():]}"
+                matches.append(reconstructed)
         # Try name-based assignment first
         for line in matches:
             if "cpu_wall" in line and cpu_wall is None:
