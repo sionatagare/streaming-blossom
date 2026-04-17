@@ -282,19 +282,24 @@ pub fn main() {
             latency_benchmarker.print_statistics();
         }
     }
-    // print out results
-    if !DISABLE_DETAIL_PRINT {
-        cpu_wall_benchmarker.debug_println();
-        latency_benchmarker.debug_println();
-    }
+    // print out results — compact lines printed twice to survive UART garbling
     print!("cpu_wall_benchmarker");
     cpu_wall_benchmarker.println();
     print!("latency_benchmarker");
     latency_benchmarker.println();
+    if !DISABLE_DETAIL_PRINT {
+        cpu_wall_benchmarker.debug_println();
+        latency_benchmarker.debug_println();
+    }
     println!("cpu_wall_benchmarker statistics:");
     cpu_wall_benchmarker.print_statistics();
     println!("latency_benchmarker statistics:");
     latency_benchmarker.print_statistics();
+    // repeat compact lines after statistics in case the first copy was garbled
+    print!("cpu_wall_benchmarker");
+    cpu_wall_benchmarker.println();
+    print!("latency_benchmarker");
+    latency_benchmarker.println();
     // print overall time consumption for use of estimation
     let all_end_native_time = unsafe { extern_c::get_native_time() };
     let all_duration = unsafe { extern_c::diff_native_time(all_begin_native_time, all_end_native_time) };
@@ -302,7 +307,10 @@ pub fn main() {
     let overall_duration = unsafe { extern_c::diff_native_time(0, all_end_native_time) };
     println!("overall duration: {overall_duration}s (from FPGA boot to program end)");
     // Lets host `get_ttyoutput` stop as soon as the benchmark finishes (default exit_word `[exit]`).
-    println!("[exit]");
+    // Print multiple times so at least one survives UART garbling.
+    for _ in 0..5 {
+        println!("[exit]");
+    }
 }
 
 pub fn test_fast_timer() {
