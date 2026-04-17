@@ -78,7 +78,7 @@ def get_ttyoutput(
         exit_words = [exit_word]
     else:
         exit_words = list(exit_word)
-    with open(filename, "r") as file:
+    with open(filename, "r", errors="replace") as file:
         file.seek(0, 2)  # seek to the end
         if command != "":
             # Never use PIPE here without a concurrent drain thread: ``xsdb`` can print
