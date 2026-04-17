@@ -81,14 +81,19 @@ def get_ttyoutput(
     with open(filename, "r") as file:
         file.seek(0, 2)  # seek to the end
         if command != "":
-            stdout = subprocess.PIPE if silent else sys.stdout
+            # Never use PIPE here without a concurrent drain thread: ``xsdb`` can print
+            # megabytes to stdout/stderr; a full pipe blocks xsdb before the ELF runs, so
+            # the next ``read()`` on the serial tty file never sees the firmware banner
+            # (looks like an unexplained hang).
+            popen_kw: dict = {
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL if silent else sys.stdout,
+                "stderr": subprocess.DEVNULL if silent else None,
+            }
             # New session so we can killpg(make) and take down xsdb + children (POSIX).
-            popen_kw: dict = {}
             if os.name != "nt" and not shell:
                 popen_kw["start_new_session"] = True
-            child = subprocess.Popen(
-                command, shell=shell, cwd=cwd, stdout=stdout, **popen_kw
-            )
+            child = subprocess.Popen(command, shell=shell, cwd=cwd, **popen_kw)
         last = time.time()
         seen_firmware_output = False
         while True:
@@ -140,7 +145,8 @@ def get_ttyoutput(
             if cooldown > 0:
                 # Let hw_server / cable release before the next ``make run_a72``.
                 time.sleep(cooldown)
-        if silent:
+        # make/xsdb stdout is discarded when silent (see PIPE deadlock note above).
+        if not silent and child.stdout is not None:
             command_output = child.stdout.read().decode("utf-8")
     return tty_output, command_output
 
