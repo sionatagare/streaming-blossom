@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import subprocess
+from subprocess import TimeoutExpired
 
 
 def _post_firmware_idle_sec(session_timeout: float) -> float:
@@ -18,6 +19,17 @@ def _post_firmware_idle_sec(session_timeout: float) -> float:
         return max(30.0, float(os.environ["TTY_POST_FIRMWARE_IDLE_SEC"]))
     # e.g. session_timeout=3600 -> 900s cap, 120s floor
     return float(min(900.0, max(120.0, session_timeout / 3.0)))
+
+
+def _firmware_markers_present(tty_so_far: str) -> bool:
+    """Match embedded banner even if a line is split across UART reads or slightly garbled."""
+    t = tty_so_far
+    return (
+        "start of build parameters" in t
+        or "end of build parameters" in t
+        or "hardware_info:" in t
+        or "USE_LAYER_FUSION:" in t
+    )
 
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -51,12 +63,11 @@ def get_ttyoutput(
             content = file.read()
             if not silent:
                 print(content, end="")
+            tty_output += content.strip("\x00")
             if content != "":
                 last = time.time()
-                # Past long silent PLM/boot: once firmware prints, use a separate idle budget.
-                if not seen_firmware_output and "start of build parameters" in content:
-                    seen_firmware_output = True
-            tty_output += content.strip("\x00")
+            if not seen_firmware_output and _firmware_markers_present(tty_output):
+                seen_firmware_output = True
             effective_timeout = (
                 _post_firmware_idle_sec(float(timeout))
                 if seen_firmware_output
@@ -68,7 +79,21 @@ def get_ttyoutput(
             if any(w in tty_output for w in exit_words):
                 break
     if command != "":
-        child.wait()
+        # TTY capture can stop (idle timeout or exit word) while make/xsdb is still running;
+        # an unconditional wait() would hang the benchmark host forever.
+        join_sec = float(os.environ.get("TTY_SUBPROCESS_JOIN_SEC", "120"))
+        try:
+            child.wait(timeout=join_sec)
+        except TimeoutExpired:
+            print(
+                f"[warning] get_ttyoutput: subprocess still running after {join_sec}s; "
+                "sending SIGTERM (set TTY_SUBPROCESS_JOIN_SEC to adjust)"
+            )
+            child.terminate()
+            try:
+                child.wait(timeout=30)
+            except TimeoutExpired:
+                child.kill()
         if silent:
             command_output = child.stdout.read().decode("utf-8")
     return tty_output, command_output
