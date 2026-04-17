@@ -288,44 +288,23 @@ pub fn main() {
                 break;
             }
         }
-        // print something every 5s
+        // Sparse progress line to keep TTY session alive without flooding UART
         let native_now = unsafe { extern_c::get_native_time() };
         if unsafe { extern_c::diff_native_time(last_native_time, native_now) } > 5. {
-            println!("[info] have run {} samples", defects_reader.count);
+            println!("[info] {}", defects_reader.count);
             last_native_time = native_now;
-            println!("latency_benchmarker statistics:");
-            latency_benchmarker.print_statistics();
         }
     }
-    // print out results — compact lines printed twice to survive UART garbling
+    // Minimal output to avoid UART TX FIFO overflow at 115200 baud.
+    // Only print what the host parser actually needs.
     print!("cpu_wall_benchmarker");
     cpu_wall_benchmarker.println();
     print!("latency_benchmarker");
     latency_benchmarker.println();
-    if !DISABLE_DETAIL_PRINT {
-        cpu_wall_benchmarker.debug_println();
-        latency_benchmarker.debug_println();
-    }
-    println!("cpu_wall_benchmarker statistics:");
-    cpu_wall_benchmarker.print_statistics();
-    println!("latency_benchmarker statistics:");
-    latency_benchmarker.print_statistics();
-    // repeat compact lines after statistics in case the first copy was garbled
-    print!("cpu_wall_benchmarker");
-    cpu_wall_benchmarker.println();
-    print!("latency_benchmarker");
-    latency_benchmarker.println();
-    // print overall time consumption for use of estimation
     let all_end_native_time = unsafe { extern_c::get_native_time() };
-    let all_duration = unsafe { extern_c::diff_native_time(all_begin_native_time, all_end_native_time) };
-    println!("evaluation duration: {all_duration}s (running the benchmark)");
     let overall_duration = unsafe { extern_c::diff_native_time(0, all_end_native_time) };
     println!("overall duration: {overall_duration}s (from FPGA boot to program end)");
-    // Lets host `get_ttyoutput` stop as soon as the benchmark finishes (default exit_word `[exit]`).
-    // Print multiple times so at least one survives UART garbling.
-    for _ in 0..5 {
-        println!("[exit]");
-    }
+    println!("[exit]");
 }
 
 pub fn test_fast_timer() {
