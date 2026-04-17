@@ -231,17 +231,30 @@ class BenchmarkDecodingResult:
             line = line.strip("\r\n ")
             if benchmarker_re.search(line):
                 matches.append(line)
-        if len(matches) >= 2:
-            # Try name-based assignment first; fall back to print order
-            for line in matches:
-                if "cpu_wall" in line and cpu_wall is None:
-                    cpu_wall = TimeDistribution.from_line(line)
-                elif "latency" in line and "cpu_wall" not in line and latency is None:
-                    latency = TimeDistribution.from_line(line)
-            if cpu_wall is None or latency is None:
-                # Names garbled beyond recognition — use print order
-                cpu_wall = TimeDistribution.from_line(matches[0])
-                latency = TimeDistribution.from_line(matches[1])
+        # Try name-based assignment first
+        for line in matches:
+            if "cpu_wall" in line and cpu_wall is None:
+                cpu_wall = TimeDistribution.from_line(line)
+            elif "latency" in line and "cpu_wall" not in line and latency is None:
+                latency = TimeDistribution.from_line(line)
+        # Fall back to print order for unassigned slots
+        unassigned = [m for m in matches if m not in
+                      ([l for l in matches if "cpu_wall" in l] +
+                       [l for l in matches if "latency" in l and "cpu_wall" not in l])]
+        if cpu_wall is None and latency is None and len(unassigned) >= 2:
+            cpu_wall = TimeDistribution.from_line(unassigned[0])
+            latency = TimeDistribution.from_line(unassigned[1])
+        elif cpu_wall is None and latency is not None and len(unassigned) >= 1:
+            cpu_wall = TimeDistribution.from_line(unassigned[0])
+        elif latency is None and cpu_wall is not None and len(unassigned) >= 1:
+            latency = TimeDistribution.from_line(unassigned[0])
+        # If only one line survived and it's identifiable, use it for both
+        if latency is not None and cpu_wall is None:
+            print("[warning] cpu_wall_benchmarker line lost to serial corruption; duplicating latency as placeholder")
+            cpu_wall = latency
+        elif cpu_wall is not None and latency is None:
+            print("[warning] latency_benchmarker line lost to serial corruption; duplicating cpu_wall as placeholder")
+            latency = cpu_wall
         if latency is None or cpu_wall is None:
             tail = "\n".join(lines[-40:])
             raise ValueError(
