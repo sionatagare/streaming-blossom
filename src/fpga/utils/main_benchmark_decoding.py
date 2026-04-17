@@ -354,6 +354,35 @@ class DecodingSpeedBenchmarkerBasic:
             shutil.move(dest_file_path, dest_file_ori_path)
         try:
             shutil.copyfile(defects_file_path, dest_file_path)
+            # For streaming mode, filter defects to top-layer vertices only.
+            # The generated defects file contains multi-layer samples (for batch mode).
+            # Streaming loads each sample onto the top layer only, so defects on
+            # lower-layer vertices corrupt the solver.
+            if os.environ.get("USE_STREAMING"):
+                project_for_graph = self.configuration.optimized_project()
+                graph_json_path = project_for_graph.graph_builder.graph_file_path()
+                if os.path.exists(graph_json_path):
+                    import json as json_mod
+                    with open(graph_json_path, "r") as f:
+                        graph_data = json_mod.load(f)
+                    if "layer_fusion" in graph_data and graph_data["layer_fusion"]:
+                        lf = graph_data["layer_fusion"]
+                        num_layers = lf["num_layers"]
+                        top_layer_id = num_layers - 1
+                        # layers[i] = list of vertex indices for layer i
+                        top_vertices = set(lf["layers"][top_layer_id])
+                        # Filter the binary defects file: keep only top-layer vertices
+                        values = np.fromfile(dest_file_path, dtype=np.uint32)
+                        filtered = []
+                        for v in values:
+                            if v == 0xFFFFFFFF:
+                                filtered.append(v)  # sample delimiter
+                            elif int(v) in top_vertices:
+                                filtered.append(v)  # top-layer defect
+                            # else: drop non-top-layer defect
+                        np.array(filtered, dtype=np.uint32).tofile(dest_file_path)
+                        print(f"[streaming] filtered defects to {len(top_vertices)} top-layer vertices "
+                              f"({len(values)} -> {len(filtered)} entries)")
             # build the project
             project = self.configuration.optimized_project()
             project.create_vivado_project(update=True)  # update c files
