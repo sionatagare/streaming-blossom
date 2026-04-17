@@ -40,6 +40,7 @@ compact = [
     "micro-blossom-nostd/u8_layer_id",
     "micro-blossom-nostd/unsafe_unwrap",
     "micro-blossom-nostd/dangerous_unwrap",
+    "micro-blossom-nostd/obstacle_potentially_outdated",
 ] # it saves 2x memory and slightly faster on R5
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
