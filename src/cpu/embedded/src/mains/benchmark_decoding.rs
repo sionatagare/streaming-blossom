@@ -40,9 +40,14 @@ pub const MAX_VERTEX_NUM: usize = unwrap_ctx!(parse_usize(option::unwrap_or!(opt
 // Instruction ISA packs node IDs as 15 bits (see Instruction32 in instruction.rs:
 // `set_speed`/`set_blossom` use `node << 17`, `add_defect_vertex` uses `node << 2`,
 // all losing bit 15 and above). IDs ≥ 32768 silently alias in hardware, corrupting
-// state. Keep the offset well below 2^15 so `offset + max_defects_per_round` never
-// overflows 15-bit node encoding.
-const MAX_STREAMING_NODE_OFFSET: usize = 32_000;
+// state.
+//
+// Split the 15-bit node space between defects and blossoms: defects in [0, 16000),
+// blossoms in [MAX_STREAMING_NODE_OFFSET, 32768). `blossom_begin` in streaming mode
+// is set to MAX_STREAMING_NODE_OFFSET so the primal correctly classifies IDs.
+// At d=3 with ~2 defects/round, reset every ~8000 rounds (offset fills first).
+// Leaves ~16000 blossom slots, far more than realistic solve sizes.
+const MAX_STREAMING_NODE_OFFSET: usize = 16_000;
 /// Reset when archive BRAM is full. Reads the same ARCHIVE_DEPTH used at RTL synthesis time.
 const ARCHIVE_DEPTH: usize =
     unwrap_ctx!(parse_usize(option::unwrap_or!(option_env!("ARCHIVE_DEPTH"), "128")));
@@ -114,8 +119,17 @@ pub fn main() {
     // create primal and dual modules
     let context_id = 0;
     let primal_module = unsafe { PRIMAL_MODULE.get().as_mut().unwrap() };
-    // adapt bit width of primal module so that node index will not overflow
-    primal_module.nodes.blossom_begin = (1 << hardware_info.vertex_bits) / 2;
+    // Adapt bit width of primal module so node index will not overflow.
+    // In batch mode, defect node IDs restart at 0 each sample, so the hardware's vertex_bits
+    // is a tight bound. In streaming mode, `streaming_node_offset` accumulates across rounds
+    // up to MAX_STREAMING_NODE_OFFSET, so blossom_begin must be at least that large — otherwise
+    // defect IDs get misclassified as blossoms (is_blossom checks `id >= blossom_begin`).
+    // Blossom IDs then occupy [blossom_begin, MAX_NODE_NUM) = [32000, 65536) = 33k slots.
+    if USE_STREAMING {
+        primal_module.nodes.blossom_begin = MAX_STREAMING_NODE_OFFSET;
+    } else {
+        primal_module.nodes.blossom_begin = (1 << hardware_info.vertex_bits) / 2;
+    }
     // Populate vertex_layer_id from the embedded.layer_ids blob so streaming mode can
     // track virtual-boundary matchings. Without this, `primal.fuse_layer` is a no-op,
     // stale matchings accumulate, and the solver diverges from hardware → hang.
