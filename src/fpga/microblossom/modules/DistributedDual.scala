@@ -145,6 +145,13 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
 
   val archiveCommitEn = Bool()
 
+  // Fields for simPublic access — set inside the elastic if-branch.
+  var diagScanActive: Bool = null
+  var diagScanTick: UInt = null
+  var diagArchiveValidCount: UInt = null
+  var diagScanActiveCounter: UInt = null
+  var diagScanStartCounter: UInt = null
+
   if (firstLayerVertexIndices.nonEmpty) {
     val warmupThreshold = config.numLayers.toInt - 1  // shifts needed before data reaches layer 0
 
@@ -206,6 +213,13 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     io.scanActiveCounter := scanActiveCounter
     io.scanStartCounter := scanStartCounter
     io.archiveValidCountOut := archiveValidCount.resize(16)
+
+    // Expose for simPublic (waveform visibility).
+    diagScanActive = scanActive
+    diagScanTick = scanTick
+    diagArchiveValidCount = archiveValidCount
+    diagScanActiveCounter = scanActiveCounter
+    diagScanStartCounter = scanStartCounter
 
     archiveCommitEn := warmupDone && (archiveValidCount < config.archiveDepth)
 
@@ -391,6 +405,14 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
   // before compiling the simulator, mark the fields as public to enable snapshot
   def simMakePublicSnapshot() = {
     io.elasticArchivePipelineBusy.simPublic()
+    // Diagnostic: expose scan FSM internals for waveform debugging.
+    if (diagScanActive != null) {
+      diagScanActive.simPublic()
+      diagScanTick.simPublic()
+      diagArchiveValidCount.simPublic()
+      diagScanActiveCounter.simPublic()
+      diagScanStartCounter.simPublic()
+    }
     vertices.foreach(vertex => {
       vertex.register.simPublic()
       vertex.io.simPublic()
