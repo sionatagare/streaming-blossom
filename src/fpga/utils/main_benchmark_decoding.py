@@ -453,6 +453,8 @@ class DecodingSpeedBenchmarkerBasic:
             make_env["EMBEDDED_BLOSSOM_MAIN"] = "benchmark_decoding"
             if os.environ.get("STREAMING_DBG_STEPS"):
                 make_env["STREAMING_DBG_STEPS"] = os.environ["STREAMING_DBG_STEPS"]
+            if os.environ.get("FIND_OBSTACLE_DBG"):
+                make_env["FIND_OBSTACLE_DBG"] = os.environ["FIND_OBSTACLE_DBG"]
             project.build_embedded_binary(make_env)
             project.build_vivado_project(force_recompile_binary=True)
             assert not project.timing_sanity_check_failed()

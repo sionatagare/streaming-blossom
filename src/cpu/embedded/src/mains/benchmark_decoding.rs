@@ -77,6 +77,10 @@ pub const USE_STREAMING: bool = option_env!("USE_STREAMING").is_some();
 /// Per-sample phase markers for streaming hangs (`[dbg_streaming] …`). UART-heavy; enable only
 /// when debugging, e.g. `STREAMING_DBG_STEPS=1` in the env passed to `make` for embedded.
 pub const STREAMING_DBG_STEPS: bool = option_env!("STREAMING_DBG_STEPS").is_some();
+/// Same compile-time switch as `dual_driver_tracked` `[fo_dbg]` (`FIND_OBSTACLE_DBG=1`).
+pub const FIND_OBSTACLE_DBG: bool = option_env!("FIND_OBSTACLE_DBG").is_some();
+/// Bracket `resolve` / `find_obstacle` / archive when either debug flag is set.
+pub const DBG_SOLVE_TRACE: bool = STREAMING_DBG_STEPS || FIND_OBSTACLE_DBG;
 
 static mut PRIMAL_MODULE: UnsafeCell<PrimalModuleEmbedded<MAX_NODE_NUM, MAX_VERTEX_NUM>> = UnsafeCell::new(PrimalModuleEmbedded::new());
 static mut DUAL_MODULE: UnsafeCell<DualModuleStackless<DualDriverTracked<DualDriver, MAX_NODE_NUM>>> =
@@ -96,6 +100,8 @@ pub fn main() {
     println!("DISABLE_DETAIL_PRINT: {DISABLE_DETAIL_PRINT:?}");
     println!("USE_STREAMING: {USE_STREAMING:?}");
     println!("STREAMING_DBG_STEPS: {STREAMING_DBG_STEPS:?}");
+    println!("FIND_OBSTACLE_DBG: {FIND_OBSTACLE_DBG:?}");
+    println!("DBG_SOLVE_TRACE: {DBG_SOLVE_TRACE:?}");
     println!("-------- end of build parameters --------");
 
     // obtain hardware information
@@ -208,52 +214,82 @@ pub fn main() {
 
             let fast_start = unsafe { extern_c::get_fast_cpu_time() };
 
-            if STREAMING_DBG_STEPS {
+            if DBG_SOLVE_TRACE {
                 println!(
-                    "[dbg_streaming] sample={} defects={} after_stall -> first find_obstacle",
+                    "[dbg_solve] sample={} defects={} AFTER_stall BEFORE_first_find_obstacle",
                     defects_reader.count,
                     num_defects
                 );
             }
 
-            // Solve until no obstacle remains. Watchdog to escape solver hangs on pathological
-            // defect patterns (rare stale archive/primal divergence — see primal_module_embedded.rs
-            // obstacle_potentially_outdated paths). Normal solves are 2-10 iterations.
+            // Solve until no obstacle remains. Two-level escape for solver stalls:
+            //   1. Repeat detector: if the exact same Conflict comes back after resolve(), primal
+            //      can't act on it (stale archived blossom / outdated event). Break to avoid
+            //      spinning to the watchdog.
+            //   2. Iteration watchdog: absolute cap as a safety net.
             const SOLVE_WATCHDOG: usize = 10_000;
             let (mut obstacle, _) = dual_module.find_obstacle();
-            if STREAMING_DBG_STEPS {
+            if DBG_SOLVE_TRACE {
                 println!(
-                    "[dbg_streaming] sample={} first find_obstacle done is_none={}",
+                    "[dbg_solve] sample={} AFTER_first_find_obstacle is_none={}",
                     defects_reader.count,
                     obstacle.is_none()
                 );
             }
             let mut solve_iters: usize = 0;
             let mut watchdog_fired = false;
+            let mut prev_obstacle_fingerprint: Option<(u32, u32, u32, u32)> = None;
+            let mut stale_streak: u32 = 0;
             while !obstacle.is_none() {
-                if STREAMING_DBG_STEPS {
+                if DBG_SOLVE_TRACE {
                     println!(
-                        "[dbg_streaming] sample={} solve_loop k={} pre_resolve",
+                        "[dbg_solve] sample={} k={} BEFORE primal_module.resolve",
                         defects_reader.count,
                         solve_iters + 1
                     );
                 }
                 primal_module.resolve(dual_module, obstacle);
-                if STREAMING_DBG_STEPS {
+                if DBG_SOLVE_TRACE {
                     println!(
-                        "[dbg_streaming] sample={} solve_loop k={} post_resolve pre_find",
+                        "[dbg_solve] sample={} k={} AFTER primal_module.resolve BEFORE find_obstacle",
                         defects_reader.count,
                         solve_iters + 1
                     );
                 }
                 (obstacle, _) = dual_module.find_obstacle();
-                if STREAMING_DBG_STEPS {
+                if DBG_SOLVE_TRACE {
                     println!(
-                        "[dbg_streaming] sample={} solve_loop k={} post_find is_none={}",
+                        "[dbg_solve] sample={} k={} AFTER find_obstacle is_none={}",
                         defects_reader.count,
                         solve_iters + 1,
                         obstacle.is_none()
                     );
+                }
+                // Detect a Conflict that repeats verbatim — primal can't make progress on it.
+                if let CompactObstacle::Conflict { node_1, node_2, vertex_1, vertex_2, .. } = obstacle {
+                    let fp = (
+                        node_1.option().map(|n| n.get() as u32).unwrap_or(u32::MAX),
+                        node_2.option().map(|n| n.get() as u32).unwrap_or(u32::MAX),
+                        vertex_1.get() as u32,
+                        vertex_2.get() as u32,
+                    );
+                    if prev_obstacle_fingerprint == Some(fp) {
+                        stale_streak += 1;
+                        if stale_streak >= 3 {
+                            println!(
+                                "[warn] stale-conflict streak at sample {}; reset+continue",
+                                defects_reader.count
+                            );
+                            watchdog_fired = true;
+                            break;
+                        }
+                    } else {
+                        stale_streak = 0;
+                        prev_obstacle_fingerprint = Some(fp);
+                    }
+                } else {
+                    stale_streak = 0;
+                    prev_obstacle_fingerprint = None;
                 }
                 solve_iters += 1;
                 if solve_iters >= SOLVE_WATCHDOG {
@@ -266,9 +302,9 @@ pub fn main() {
                 }
             }
 
-            if STREAMING_DBG_STEPS {
+            if DBG_SOLVE_TRACE {
                 println!(
-                    "[dbg_streaming] sample={} solve_iters={} watchdog_fired={}",
+                    "[dbg_solve] sample={} solve_loop_exit solve_iters={} watchdog_fired={}",
                     defects_reader.count, solve_iters, watchdog_fired
                 );
             }
@@ -281,17 +317,17 @@ pub fn main() {
                 continue;
             }
 
-            if STREAMING_DBG_STEPS {
+            if DBG_SOLVE_TRACE {
                 println!(
-                    "[dbg_streaming] sample={} pre archive_elastic_slice",
+                    "[dbg_solve] sample={} BEFORE archive_elastic_slice",
                     defects_reader.count
                 );
             }
             // Archive: shifts layer state down, resets top layer for next measurement
             dual_module.archive_elastic_slice();
-            if STREAMING_DBG_STEPS {
+            if DBG_SOLVE_TRACE {
                 println!(
-                    "[dbg_streaming] sample={} post archive_elastic_slice",
+                    "[dbg_solve] sample={} AFTER archive_elastic_slice",
                     defects_reader.count
                 );
             }
