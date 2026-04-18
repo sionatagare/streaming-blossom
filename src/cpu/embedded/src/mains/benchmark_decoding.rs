@@ -32,7 +32,12 @@ make -C ../../fpga/Xilinx/VMK180_Micro_Blossom run_a72
 
 // guarantees decoding up to d=39
 pub const MAX_NODE_NUM: usize = unwrap_ctx!(parse_usize(option::unwrap_or!(option_env!("MAX_NODE_NUM"), "65536")));
-const MAX_STREAMING_NODE_OFFSET: usize = MAX_NODE_NUM - 256;
+// Instruction ISA packs node IDs as 15 bits (see Instruction32 in instruction.rs:
+// `set_speed`/`set_blossom` use `node << 17`, `add_defect_vertex` uses `node << 2`,
+// all losing bit 15 and above). IDs ≥ 32768 silently alias in hardware, corrupting
+// state. Keep the offset well below 2^15 so `offset + max_defects_per_round` never
+// overflows 15-bit node encoding.
+const MAX_STREAMING_NODE_OFFSET: usize = 32_000;
 /// Reset when archive BRAM is full. Reads the same ARCHIVE_DEPTH used at RTL synthesis time.
 const ARCHIVE_DEPTH: usize =
     unwrap_ctx!(parse_usize(option::unwrap_or!(option_env!("ARCHIVE_DEPTH"), "128")));

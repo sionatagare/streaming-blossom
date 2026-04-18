@@ -22,6 +22,12 @@ impl<const VN: usize> LayerFusionData<VN> {
         self.vertex_layer_id[vertex_index.get() as usize]
     }
 
+    /// Clear pending breaks. Used on streaming-mode reset where the node index space
+    /// restarts from 0; any lingering breaks would reference defunct node IDs.
+    pub fn clear(&mut self) {
+        self.count_pending_breaks = 0;
+    }
+
     /// record a matching with some vertex that is currently virtual but will be fused later;
     /// when `fuse_layer` is called, we should break such matchings becausse they are no longer valid
     pub fn append_break(&mut self, node_index: CompactNodeIndex) {

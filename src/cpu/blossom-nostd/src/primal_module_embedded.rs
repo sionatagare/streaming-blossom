@@ -33,6 +33,7 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
 impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N, VN> {
     fn reset(&mut self) {
         self.nodes.clear();
+        self.layer_fusion.clear();
     }
 
     fn is_blossom(&self, node_index: CompactNodeIndex) -> bool {
