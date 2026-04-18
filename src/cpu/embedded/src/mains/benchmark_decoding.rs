@@ -275,7 +275,7 @@ pub fn main() {
                 // to have fully landed (~10 pipeline stages × ~6ns = 60ns; use 500ns to be safe).
                 let wait_start = unsafe { extern_c::get_native_time() };
                 while unsafe { extern_c::diff_native_time(wait_start, extern_c::get_native_time()) }
-                    < 500e-9_f32
+                    < 100e-6_f32
                 {
                     spin_loop();
                 }
@@ -313,7 +313,7 @@ pub fn main() {
                 // Spin-wait for RESET's writeback to land (see watchdog path).
                 let wait_start = unsafe { extern_c::get_native_time() };
                 while unsafe { extern_c::diff_native_time(wait_start, extern_c::get_native_time()) }
-                    < 500e-9_f32
+                    < 100e-6_f32
                 {
                     spin_loop();
                 }
