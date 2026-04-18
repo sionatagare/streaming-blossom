@@ -70,6 +70,13 @@ fn main() {
     if !defects_file.exists() {
         std::fs::write(defects_file, [u8::MAX; 4]).unwrap();
     }
+    // create empty embedded.layer_ids if it doesn't exist (u16_le=0 vertex_num, empty mapping).
+    // Populated by the host build script when USE_STREAMING is set.
+    let layer_ids_file = Path::new("./embedded.layer_ids");
+    if !layer_ids_file.exists() {
+        std::fs::write(layer_ids_file, [0u8; 2]).unwrap();
+    }
+    println!("cargo:rerun-if-changed=embedded.layer_ids");
 
     // from test_micro_blossom
     println!("cargo:rerun-if-env-changed=EDGE_0_LEFT");
