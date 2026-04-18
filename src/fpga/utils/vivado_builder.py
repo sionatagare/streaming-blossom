@@ -311,7 +311,7 @@ class MicroBlossomAxi4Builder:
                 cwd=self.hardware_proj_dir(),
                 silent=silent,
                 timeout=timeout,
-                exit_word=["[exit]", "overall duration"],
+                exit_word=["[exit]", "overall duration", "evaluation duration"],
             )
             log.write(
                 f"[host_event] [make run_a72 finish] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"

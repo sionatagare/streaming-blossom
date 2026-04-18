@@ -72,7 +72,14 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                 cfg_if::cfg_if! {
                     if #[cfg(feature="obstacle_potentially_outdated")] {
                         if self.nodes.is_blossom(node_1) && !self.nodes.has_node(node_1) {
-                            return true; // outdated event
+                            // Outdated: blossom was expanded. Force archive rescan by resyncing
+                            // the outer blossom's speed. set_speed triggers needsArchivedScan which
+                            // updates stale archived entries. Without this, find_obstacle keeps
+                            // returning the same stale conflict forever.
+                            let outer = self.nodes.get_outer_blossom(node_1);
+                            let speed = self.nodes.get_grow_state(outer);
+                            dual_module.set_speed(self.nodes.is_blossom(outer), outer, speed);
+                            return true;
                         }
                         // also convert the conflict to between the outer blossom
                         node_1 = self.nodes.get_outer_blossom(node_1);
@@ -80,7 +87,10 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                             self.nodes.check_node_index(some_node_2);
                             self.nodes.check_node_index(usu!(touch_2));
                             if self.nodes.is_blossom(some_node_2) && !self.nodes.has_node(some_node_2) {
-                                return true; // outdated event
+                                let outer = self.nodes.get_outer_blossom(some_node_2);
+                                let speed = self.nodes.get_grow_state(outer);
+                                dual_module.set_speed(self.nodes.is_blossom(outer), outer, speed);
+                                return true;
                             }
                             node_2 = self.nodes.get_outer_blossom(some_node_2).option();
                         }
@@ -99,18 +109,26 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                     );
                     cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                         if node_1 == node_2 {
-                            return true; // outdated event: already in the same blossom
+                            // Outdated: already merged. Force archive rescan.
+                            let speed = self.nodes.get_grow_state(node_1);
+                            dual_module.set_speed(self.nodes.is_blossom(node_1), node_1, speed);
+                            return true;
                         }
                         if !CompactGrowState::is_conflicting(
                                 self.nodes.get_grow_state(node_1), self.nodes.get_grow_state(node_2)) {
-                            return true; // outdated event
+                            // Outdated: grow states have changed since archive. Resync both.
+                            dual_module.set_speed(self.nodes.is_blossom(node_1), node_1, self.nodes.get_grow_state(node_1));
+                            dual_module.set_speed(self.nodes.is_blossom(node_2), node_2, self.nodes.get_grow_state(node_2));
+                            return true;
                         }
                     } }
                     self.resolve_conflict(dual_module, node_1, node_2, touch_1, usu!(touch_2), vertex_1, vertex_2)
                 } else {
                     cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                         if self.nodes.get_grow_state(node_1) != CompactGrowState::Grow {
-                            return true; // outdated event
+                            // Outdated: node is no longer growing. Resync speed to archive.
+                            dual_module.set_speed(self.nodes.is_blossom(node_1), node_1, self.nodes.get_grow_state(node_1));
+                            return true;
                         }
                     } }
                     self.resolve_conflict_virtual(dual_module, node_1, touch_1, vertex_1, vertex_2)
@@ -120,12 +138,19 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                 debug_assert!(self.nodes.is_blossom(blossom));
                 cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                     if !self.nodes.has_node(blossom) {
-                        return true; // outdated event
+                        // Outdated: blossom already expanded. We can't resync speed of a node
+                        // that no longer exists, so issue set_speed on the old node index as a
+                        // no-op scan trigger — hardware archive logic will ignore matches on a
+                        // non-existent node but the scan still runs and refreshes the aggregate.
+                        dual_module.set_speed(true, blossom, CompactGrowState::Stay);
+                        return true;
                     }
                     // also convert the event to the outer blossom
                     blossom = self.nodes.get_outer_blossom(blossom);
                     if self.nodes.get_grow_state(blossom) != CompactGrowState::Shrink {
-                        return true; // outdated event
+                        // Outdated: blossom is no longer shrinking. Resync speed to archive.
+                        dual_module.set_speed(true, blossom, self.nodes.get_grow_state(blossom));
+                        return true;
                     }
                 } }
                 self.resolve_blossom_need_expand(dual_module, blossom)
