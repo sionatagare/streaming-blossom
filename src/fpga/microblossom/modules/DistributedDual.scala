@@ -151,7 +151,6 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
   var diagArchiveValidCount: UInt = null
   var diagScanActiveCounter: UInt = null
   var diagScanStartCounter: UInt = null
-  var diagScanWatchdogFired: Bool = null
 
   if (firstLayerVertexIndices.nonEmpty) {
     val warmupThreshold = config.numLayers.toInt - 1  // shifts needed before data reaches layer 0
@@ -221,7 +220,6 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     diagArchiveValidCount = archiveValidCount
     diagScanActiveCounter = scanActiveCounter
     diagScanStartCounter = scanStartCounter
-    diagScanWatchdogFired = scanWatchdogFired
 
     archiveCommitEn := warmupDone && (archiveValidCount < config.archiveDepth)
 
@@ -242,26 +240,12 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
 
     // Edge scan: feed archiveValidCount indices, then drain for pipeline + fusion delay.
     val scanEndTick = archiveValidCount.resize(scanTickWidth) + U(((config.executeLatency + fusionExtra - 1) max 0), scanTickWidth bits)
-    // Watchdog limit: a normal scan completes at scanEndTick. If for any reason scanTick
-    // reaches 2× that without the normal deassert firing, force-deassert. Prevents firmware
-    // hangs from scan-stuck RTL edge cases (observed at sample 58972 on streaming runs);
-    // in correct operation, the watchdog never fires — the scanTick === scanEndTick path
-    // deasserts first. scanTickWidth is wide enough to hold 2×scanEndTick.
-    val scanWatchdogLimit = (scanEndTick << 1).resize(scanTickWidth)
-    val scanWatchdogFired = Reg(Bool()) init False
     when(scanActive) {
       when(scanTick === scanEndTick) {
         scanActive := False
-      } elsewhen(scanTick === scanWatchdogLimit) {
-        scanActive := False
-        scanWatchdogFired := True
       } otherwise {
         scanTick := scanTick + 1
       }
-    }
-    // Clear watchdog-fired on reset so firmware can poll it as a diagnostic.
-    when(broadcastRegInserted.valid && broadcastRegInserted.instruction.isReset()) {
-      scanWatchdogFired := False
     }
 
     // Scan input index: the register file index being fed into the pipeline this cycle
@@ -428,7 +412,6 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       diagArchiveValidCount.simPublic()
       diagScanActiveCounter.simPublic()
       diagScanStartCounter.simPublic()
-      diagScanWatchdogFired.simPublic()
     }
     vertices.foreach(vertex => {
       vertex.register.simPublic()
