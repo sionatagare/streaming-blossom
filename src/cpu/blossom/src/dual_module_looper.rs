@@ -2023,4 +2023,97 @@ mod tests {
 
         println!("\n  === dual_module_looper_streaming_random_defects — ALL PASS ===");
     }
+
+    /// Reproduce the hardware hang observed at sample 58972 (p=6.31e-4, d=3).
+    /// The firmware's instr_dbg trace showed:
+    ///   1. ~604 empty rounds accumulating archive state since last reset
+    ///   2. A sample with 1 defect at vertex=12 (node=13)
+    ///   3. First find_obstacle returned Conflict with grown=0 (archived tight edge)
+    ///   4. resolve() issued set_speed(13, Grow), set_speed(11, Shrink), set_speed(12, Grow)
+    ///   5. Next find_obstacle hung indefinitely (AXI read waiting for scan to complete)
+    ///
+    /// Nodes 11, 12 were defects added in previous samples of this reset cycle
+    /// (streaming doesn't reset per-sample). To reproduce, we need to have nodes
+    /// 11 and 12 already added and archived; we simulate this with a synthetic
+    /// setup that creates the same primal/dual state.
+    ///
+    /// Run with: `WITH_WAVEFORM=1 cargo test dual_module_looper_replay_sample_58972_hang -- --nocapture`
+    /// Then open the waveform and inspect scanActive, scanTick, archiveValidCount,
+    /// and the new scanActiveCounter / scanStartCounter signals at the hang point.
+    #[test]
+    #[ignore = "reproduction of real-hardware hang; slow and expects a hang; enable manually"]
+    fn dual_module_looper_replay_sample_58972_hang() {
+        use micro_blossom_nostd::util::*;
+        use fusion_blossom::example_codes::*;
+
+        // d=3 circuit-level has ~30 vertices, num_layers=3. Reproduce with the same
+        // graph topology as the FPGA run.
+        let code = PhenomenologicalRotatedCode::new(3, 2, 0.1, 1);
+        let mut graph = crate::resources::MicroBlossomSingle::new_code(&code);
+        graph.offloading = crate::resources::OffloadingFinder::new();
+        let archive_depth = 1024;
+        let (mut dual, mut primal, _graph, top_layer) =
+            make_streaming_env_from_graph(graph, archive_depth);
+
+        // Stage 1: Accumulate archive state via ~604 empty rounds (no defects).
+        // Matches the pre-hang state: archiveValidCount ≈ 604, archive holds
+        // historical vertex states.
+        let empty_rounds = 604;
+        println!("  [replay] stage 1: {empty_rounds} empty rounds to build archive state");
+        for _ in 0..empty_rounds {
+            dual.fuse_layer(top_layer);
+            let _ = dual.find_obstacle();
+            dual.archive_elastic_slice();
+        }
+
+        // Stage 2: Sample N-1 — two defects at vertices 10 and 11, matched as a pair.
+        // From trace (seq 478735-478754):
+        //   add_defect(vertex=10, node=11)
+        //   add_defect(vertex=11, node=12)
+        //   fuse_layer(2), set_max_growth, find_obstacle → Conflict
+        //   set_speed(11, Stay), set_speed(12, Stay) — pre-matching resolution
+        //   find_obstacle → None, archive_elastic_slice
+        println!("  [replay] stage 2: sample N-1 — defects at v10, v11 → matched pair (11, 12)");
+        dual.add_defect(ni!(10), ni!(11));
+        dual.add_defect(ni!(11), ni!(12));
+        dual.fuse_layer(top_layer);
+        primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
+        let mut iter = 0;
+        let (mut obs, _) = dual.find_obstacle();
+        while !obs.is_none() && iter < 100 {
+            primal.resolve(&mut *dual, obs);
+            (obs, _) = dual.find_obstacle();
+            iter += 1;
+        }
+        dual.archive_elastic_slice();
+
+        // Stage 3: Sample N (the hanging sample).
+        // From trace (seq 478755+):
+        //   add_defect(vertex=12, node=13)
+        //   fuse_layer(2), set_max_growth, find_obstacle → Conflict grown=0 (archived tight edge)
+        //   primal resolve issues:
+        //     set_speed(13, Grow) — new defect
+        //     set_speed(11, Shrink) — break the matched pair
+        //     set_speed(12, Grow) — other side of match
+        //   Next find_obstacle HANGS on hardware.
+        println!("  [replay] stage 3: sample N — add_defect(v12, n13), expect hang after resolve");
+        dual.add_defect(ni!(12), ni!(13));
+        dual.fuse_layer(top_layer);
+        primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
+
+        println!("  [replay] first find_obstacle of hang sample — expect Conflict with grown=0");
+        let (obs, grown) = dual.find_obstacle();
+        println!("  [replay] got: {obs:?} grown={grown}");
+
+        println!("  [replay] primal.resolve — expect augmentation (13 Grow, 11 Shrink, 12 Grow)");
+        if !obs.is_none() {
+            primal.resolve(&mut *dual, obs);
+        }
+
+        println!("  [replay] second find_obstacle — HANG EXPECTED HERE");
+        let (obs, grown) = dual.find_obstacle();
+        println!("  [replay] if we got here, no hang: {obs:?} grown={grown}");
+
+        println!("\n  === replay complete (inspect waveform for scanActive behavior) ===");
+    }
 }

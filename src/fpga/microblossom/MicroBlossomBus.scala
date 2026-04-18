@@ -176,6 +176,20 @@ case class MicroBlossomBus[T <: IMasterSlave, F <: BusSlaveFactoryDelayed](
         address = 48,
         documentation = "error counter"
       ) init (0)
+    // Diagnostic: scan FSM state (read-only, driven by microBlossom passthrough below).
+    // Firmware reads these to detect/diagnose scan-stuck hangs without needing waveforms.
+    //   addr 56: scanActive, bit 0 (other bits zero)
+    //   addr 64: scanActiveCounter (cycles with scanActive high since last RESET)
+    //   addr 72: scanStartCounter (number of scan-start transitions since last RESET)
+    //   addr 80: archiveValidCount (current archive fill level, low 16 bits used)
+    val scanActiveBit = UInt(32 bits)
+    val scanActiveCounterReg = UInt(32 bits)
+    val scanStartCounterReg = UInt(32 bits)
+    val archiveValidCountReg = UInt(32 bits)
+    factory.readMultiWord(scanActiveBit, 56, documentation = "scanActive (bit 0)")
+    factory.readMultiWord(scanActiveCounterReg, 64, documentation = "scanActiveCounter")
+    factory.readMultiWord(scanStartCounterReg, 72, documentation = "scanStartCounter")
+    factory.readMultiWord(archiveValidCountReg, 80, documentation = "archiveValidCount")
   }
   val hasError = Bool
   hasError := False
@@ -251,6 +265,15 @@ case class MicroBlossomBus[T <: IMasterSlave, F <: BusSlaveFactoryDelayed](
   ccFifoPush.io.push.valid := False
   ccFifoPush.io.push.payload.assignDontCare()
   ccFifoPop.io.pop.ready := False
+
+  // Drive diagnostic registers from the microBlossom passthrough.
+  // For read-only observation registers, a direct connect is fine — the counters are
+  // monotonic and slow-changing, so any occasional torn read across clock domains is
+  // acceptable (firmware polls them multiple times to detect progress).
+  hardwareInfo.scanActiveBit := microBlossom.io.scanActive.asUInt.resize(32)
+  hardwareInfo.scanActiveCounterReg := microBlossom.io.scanActiveCounter
+  hardwareInfo.scanStartCounterReg := microBlossom.io.scanStartCounter
+  hardwareInfo.archiveValidCountReg := microBlossom.io.archiveValidCount.resize(32)
 
   // create the control registers
   val maximumGrowth = OneMem(UInt(16 bits), config.contextDepth) init List.fill(config.contextDepth)(U(0, 16 bits))
