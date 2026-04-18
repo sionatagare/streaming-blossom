@@ -231,8 +231,30 @@ pub fn main() {
             let mut solve_iters: usize = 0;
             let mut watchdog_fired = false;
             while !obstacle.is_none() {
+                if STREAMING_DBG_STEPS {
+                    println!(
+                        "[dbg_streaming] sample={} solve_loop k={} pre_resolve",
+                        defects_reader.count,
+                        solve_iters + 1
+                    );
+                }
                 primal_module.resolve(dual_module, obstacle);
+                if STREAMING_DBG_STEPS {
+                    println!(
+                        "[dbg_streaming] sample={} solve_loop k={} post_resolve pre_find",
+                        defects_reader.count,
+                        solve_iters + 1
+                    );
+                }
                 (obstacle, _) = dual_module.find_obstacle();
+                if STREAMING_DBG_STEPS {
+                    println!(
+                        "[dbg_streaming] sample={} solve_loop k={} post_find is_none={}",
+                        defects_reader.count,
+                        solve_iters + 1,
+                        obstacle.is_none()
+                    );
+                }
                 solve_iters += 1;
                 if solve_iters >= SOLVE_WATCHDOG {
                     watchdog_fired = true;
