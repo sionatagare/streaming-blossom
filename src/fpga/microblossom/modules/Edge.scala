@@ -506,6 +506,20 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
     liveMaxGrowableReg := edgeResponse.io.maxGrowable
     liveConflictReg := edgeResponse.io.conflict
   }
+  // Explicitly force liveConflictReg to invalid on RESET instruction, in case
+  // edgeResponse.io.conflict produces stale data during RESET propagation due to
+  // peer vertex states at updateGet3 not yet reflecting their reset values.
+  // Safe: RESET semantics are "no active conflicts", so clearing is always correct.
+  when(isResetAtUpdate) {
+    liveMaxGrowableReg.length := liveMaxGrowableReg.length.maxValue
+    liveConflictReg.valid := False
+    liveConflictReg.node1 := convergecastConflictBitsInit
+    liveConflictReg.node2 := convergecastConflictBitsInit
+    liveConflictReg.touch1 := convergecastConflictBitsInit
+    liveConflictReg.touch2 := convergecastConflictBitsInit
+    liveConflictReg.vertex1 := convergecastConflictBitsInit
+    liveConflictReg.vertex2 := convergecastConflictBitsInit
+  }
 
   // Final output: min of captured live and accumulated archived
   val combinedMaxGrowable = ConvergecastMaxGrowable(config.weightBits)
