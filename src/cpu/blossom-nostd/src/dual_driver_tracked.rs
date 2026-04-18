@@ -67,6 +67,14 @@ impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualStacklessDr
             if !obstacle.is_finite_growth() {
                 return (obstacle, grown);
             }
+            // If hardware reports GrowLength but grew nothing, there's no forward progress:
+            // at least one edge is already tight (max_growable=0) and no conflict is emitted
+            // (can happen in streaming when tight-edge endpoints are both unavailable, e.g.
+            // both virtual after layer fusion). Re-asking would produce the same result.
+            // Semantically this is "no obstacles the decoder can act on" → return None.
+            if local_grown == 0 {
+                return (CompactObstacle::None, grown);
+            }
         }
     }
 
