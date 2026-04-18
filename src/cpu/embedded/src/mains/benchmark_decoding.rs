@@ -214,14 +214,6 @@ pub fn main() {
 
             let fast_start = unsafe { extern_c::get_fast_cpu_time() };
 
-            if DBG_SOLVE_TRACE {
-                println!(
-                    "[dbg_solve] sample={} defects={} AFTER_stall BEFORE_first_find_obstacle",
-                    defects_reader.count,
-                    num_defects
-                );
-            }
-
             // Solve until no obstacle remains. Two-level escape for solver stalls:
             //   1. Repeat detector: if the exact same Conflict comes back after resolve(), primal
             //      can't act on it (stale archived blossom / outdated event). Break to avoid
@@ -229,25 +221,11 @@ pub fn main() {
             //   2. Iteration watchdog: absolute cap as a safety net.
             const SOLVE_WATCHDOG: usize = 10_000;
             let (mut obstacle, _) = dual_module.find_obstacle();
-            if DBG_SOLVE_TRACE {
-                println!(
-                    "[dbg_solve] sample={} AFTER_first_find_obstacle is_none={}",
-                    defects_reader.count,
-                    obstacle.is_none()
-                );
-            }
             let mut solve_iters: usize = 0;
             let mut watchdog_fired = false;
             let mut prev_obstacle_fingerprint: Option<(u32, u32, u32, u32)> = None;
             let mut stale_streak: u32 = 0;
             while !obstacle.is_none() {
-                if DBG_SOLVE_TRACE {
-                    println!(
-                        "[dbg_solve] sample={} k={} BEFORE primal_module.resolve",
-                        defects_reader.count,
-                        solve_iters + 1
-                    );
-                }
                 primal_module.resolve(dual_module, obstacle);
                 if DBG_SOLVE_TRACE {
                     // Poll scan FSM diagnostic registers BEFORE the find_obstacle call that
@@ -258,20 +236,12 @@ pub fn main() {
                     let ssc = unsafe { extern_c::get_scan_start_counter() };
                     let avc = unsafe { extern_c::get_archive_valid_count() };
                     println!(
-                        "[dbg_solve] sample={} k={} AFTER resolve; scanActive={sa} scanActiveCtr={sac} scanStartCtr={ssc} archiveValid={avc} BEFORE find_obstacle",
+                        "[dbg_solve] sample={} k={} scanActive={sa} scanActiveCtr={sac} scanStartCtr={ssc} archiveValid={avc}",
                         defects_reader.count,
                         solve_iters + 1
                     );
                 }
                 (obstacle, _) = dual_module.find_obstacle();
-                if DBG_SOLVE_TRACE {
-                    println!(
-                        "[dbg_solve] sample={} k={} AFTER find_obstacle is_none={}",
-                        defects_reader.count,
-                        solve_iters + 1,
-                        obstacle.is_none()
-                    );
-                }
                 // Detect a Conflict that repeats verbatim — primal can't make progress on it.
                 if let CompactObstacle::Conflict { node_1, node_2, vertex_1, vertex_2, .. } = obstacle {
                     let fp = (
@@ -309,13 +279,6 @@ pub fn main() {
                 }
             }
 
-            if DBG_SOLVE_TRACE {
-                println!(
-                    "[dbg_solve] sample={} solve_loop_exit solve_iters={} watchdog_fired={}",
-                    defects_reader.count, solve_iters, watchdog_fired
-                );
-            }
-
             if watchdog_fired {
                 primal_module.reset();
                 dual_module.reset();
@@ -324,20 +287,8 @@ pub fn main() {
                 continue;
             }
 
-            if DBG_SOLVE_TRACE {
-                println!(
-                    "[dbg_solve] sample={} BEFORE archive_elastic_slice",
-                    defects_reader.count
-                );
-            }
             // Archive: shifts layer state down, resets top layer for next measurement
             dual_module.archive_elastic_slice();
-            if DBG_SOLVE_TRACE {
-                println!(
-                    "[dbg_solve] sample={} AFTER archive_elastic_slice",
-                    defects_reader.count
-                );
-            }
 
             let native_after_archive = unsafe { extern_c::get_native_time() };
             let hardware_diff =
