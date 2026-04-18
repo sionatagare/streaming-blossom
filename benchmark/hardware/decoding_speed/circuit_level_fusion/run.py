@@ -39,8 +39,8 @@ if __name__ == "__main__":
                 p=p,
                 samples=SAMPLES,
                 use_layer_fusion=True,
-                # Per-sample println saturates UART and corrupts lines; keep summary-only output.
                 enable_detailed_print=False,
+                # Per-sample println saturates UART and corrupts lines; keep summary-only output.
             )
             result = benchmarker.run()
             latency_vec.append(result.latency)
