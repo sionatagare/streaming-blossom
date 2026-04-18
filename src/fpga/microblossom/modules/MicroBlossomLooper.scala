@@ -33,11 +33,6 @@ case class MicroBlossomLooper[T <: Data](config: DualConfig, tagType: HardType[T
     val push = slave Stream (LooperInput(config, tagType))
     val pop = master Stream (LooperOutput(config, tagType))
     val dataLoss = out(Bool())
-    // Diagnostic passthrough from DistributedDual
-    val scanActive = out(Bool())
-    val scanActiveCounter = out(UInt(32 bits))
-    val scanStartCounter = out(UInt(32 bits))
-    val archiveValidCount = out(UInt(16 bits))
   }
 
   // define variables
@@ -55,12 +50,6 @@ case class MicroBlossomLooper[T <: Data](config: DualConfig, tagType: HardType[T
 
   // create MicroBlossom module
   val microBlossom = DistributedDual(config, config)
-
-  // Diagnostic passthrough to the AXI bus
-  io.scanActive := microBlossom.io.elasticArchivePipelineBusy
-  io.scanActiveCounter := microBlossom.io.scanActiveCounter
-  io.scanStartCounter := microBlossom.io.scanStartCounter
-  io.archiveValidCount := microBlossom.io.archiveValidCountOut
 
   // immediate feedback happens when the response allows immediate growth
   // when maximumGrowth is 0, the loopback is forbidden

@@ -177,23 +177,6 @@ case class MicroBlossomBus[T <: IMasterSlave, F <: BusSlaveFactoryDelayed](
         documentation = "error counter"
       ) init (0)
   }
-
-  // Diagnostic: scan FSM state (read-only, driven by microBlossom passthrough below).
-  // Registered at top level so the factory read always sees a stable synchronous value.
-  // Previous attempt used wires driven across Area boundaries — SpinalHDL elaborated them
-  // as constant zero. Using Regs here ensures the drive is explicit and synchronous.
-  //   addr 56: scanActive (bit 0)
-  //   addr 64: scanActiveCounter (cycles with scanActive high since last RESET)
-  //   addr 72: scanStartCounter (number of scan-start transitions since last RESET)
-  //   addr 80: archiveValidCount (current archive fill level, low 16 bits used)
-  val diagScanActiveBit = Reg(UInt(32 bits)) init 0
-  val diagScanActiveCounterReg = Reg(UInt(32 bits)) init 0
-  val diagScanStartCounterReg = Reg(UInt(32 bits)) init 0
-  val diagArchiveValidCountReg = Reg(UInt(32 bits)) init 0
-  factory.readMultiWord(diagScanActiveBit, 56, documentation = "scanActive (bit 0)")
-  factory.readMultiWord(diagScanActiveCounterReg, 64, documentation = "scanActiveCounter")
-  factory.readMultiWord(diagScanStartCounterReg, 72, documentation = "scanStartCounter")
-  factory.readMultiWord(diagArchiveValidCountReg, 80, documentation = "archiveValidCount")
   val hasError = Bool
   hasError := False
   when(hasError) {
@@ -269,18 +252,6 @@ case class MicroBlossomBus[T <: IMasterSlave, F <: BusSlaveFactoryDelayed](
   ccFifoPush.io.push.payload.assignDontCare()
   ccFifoPop.io.pop.ready := False
 
-  // Drive diagnostic registers from the microBlossom passthrough via BufferCC.
-  // microBlossom lives in slowClockDomain; these registers are in the fast (bus) clock
-  // domain. BufferCC provides 2-FF synchronization. For multi-bit counters there can be
-  // torn reads across the boundary, but since the values change slowly (cycles-level)
-  // and firmware polls them repeatedly, this is acceptable for diagnostic use.
-  //
-  // Previous version drove these directly without CDC, which elaborated to constant
-  // zero under async clocks (clockDivideBy != 1). BufferCC fixes that.
-  diagScanActiveBit := BufferCC(microBlossom.io.scanActive).asUInt.resize(32)
-  diagScanActiveCounterReg := BufferCC(microBlossom.io.scanActiveCounter)
-  diagScanStartCounterReg := BufferCC(microBlossom.io.scanStartCounter)
-  diagArchiveValidCountReg := BufferCC(microBlossom.io.archiveValidCount).resize(32)
 
   // create the control registers
   val maximumGrowth = OneMem(UInt(16 bits), config.contextDepth) init List.fill(config.contextDepth)(U(0, 16 bits))

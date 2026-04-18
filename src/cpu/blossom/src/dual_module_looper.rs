@@ -2043,17 +2043,56 @@ mod tests {
     #[test]
     #[ignore = "reproduction of real-hardware hang; slow and expects a hang; enable manually"]
     fn dual_module_looper_replay_sample_58972_hang() {
+        use crate::primal_module_embedded_adaptor::PrimalModuleEmbedded;
         use micro_blossom_nostd::util::*;
-        use fusion_blossom::example_codes::*;
 
-        // d=3 circuit-level has ~30 vertices, num_layers=3. Reproduce with the same
-        // graph topology as the FPGA run.
-        let code = PhenomenologicalRotatedCode::new(3, 2, 0.1, 1);
-        let mut graph = crate::resources::MicroBlossomSingle::new_code(&code);
-        graph.offloading = crate::resources::OffloadingFinder::new();
+        // Load the exact d=3 circuit-level graph used by the FPGA run, with offloading populated.
+        // The helper make_streaming_env_from_graph would overwrite offloading with empty, so we
+        // inline the setup here to preserve the offloader that pre-matches pairs on hardware.
+        let graph_path = format!(
+            "{}/../../../resources/graphs/example_circuit_level_d3.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let json_str = std::fs::read_to_string(&graph_path)
+            .unwrap_or_else(|e| panic!("read graph {graph_path}: {e}"));
+        let mut graph: MicroBlossomSingle = serde_json::from_str(&json_str).expect("parse graph");
+        // Populate offloading just like the hardware synthesis does.
+        let initializer = graph.get_initializer();
+        let mut offloading = crate::resources::OffloadingFinder::new();
+        offloading.find_first_order(&initializer);
+        graph.offloading = offloading;
+
         let archive_depth = 1024;
-        let (mut dual, mut primal, _graph, top_layer) =
-            make_streaming_env_from_graph(graph, archive_depth);
+        let config: DualLooperConfig = serde_json::from_value(json!({
+            "name": format!("replay_58972_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 100000),
+            "sim_config": {
+                "support_layer_fusion": true,
+                "support_offloading": true,
+                "archive_depth": archive_depth
+            }
+        }))
+        .unwrap();
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+        let top_layer = (num_layers - 1) as CompactLayerNum;
+        let mut dual: Box<DualModuleLooper> = stacker::grow(MAX_NODE_NUM * 256, || {
+            Box::new(DualModuleStackless::new(
+                DualDriverTracked::new(DualModuleLooperDriver::new(graph.clone(), config).unwrap()),
+            ))
+        });
+        let mut primal: Box<PrimalModuleEmbedded<MAX_NODE_NUM>> =
+            stacker::grow(MAX_NODE_NUM * 256, || Box::new(PrimalModuleEmbedded::new()));
+        primal.nodes.blossom_begin = graph.vertex_num;
+        if let Some(lf) = graph.layer_fusion.as_ref() {
+            for vertex_index in 0..graph.vertex_num {
+                if let Some(&layer_id) = lf.vertex_layer_id.get(&vertex_index) {
+                    primal.layer_fusion.vertex_layer_id[vertex_index] =
+                        CompactLayerId::new(layer_id as CompactLayerNum);
+                }
+            }
+        }
+        let _graph = graph;
 
         // Stage 1: Accumulate archive state via ~604 empty rounds (no defects).
         // Matches the pre-hang state: archiveValidCount ≈ 604, archive holds

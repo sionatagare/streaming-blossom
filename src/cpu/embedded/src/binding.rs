@@ -109,12 +109,6 @@ pub mod extern_c {
         pub fn get_transaction_counter() -> uint32_t;
         pub fn clear_error_counter();
         pub fn get_error_counter() -> uint32_t;
-
-        /// Scan FSM diagnostic registers (RTL commit 5cb30d1).
-        pub fn get_scan_active() -> uint32_t;
-        pub fn get_scan_active_counter() -> uint32_t;
-        pub fn get_scan_start_counter() -> uint32_t;
-        pub fn get_archive_valid_count() -> uint32_t;
     }
 
     impl SingleReadout {

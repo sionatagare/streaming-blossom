@@ -63,25 +63,6 @@ uint32_t get_error_counter()
     return Xil_In32(UB_BASE + 48);
 }
 
-/* Scan FSM diagnostic registers (added in RTL commit 5cb30d1).
- * Read-only. Reset by issuing a RESET instruction. */
-uint32_t get_scan_active(void)
-{
-    return Xil_In32(UB_BASE + 56) & 0x1;
-}
-uint32_t get_scan_active_counter(void)
-{
-    return Xil_In32(UB_BASE + 64);
-}
-uint32_t get_scan_start_counter(void)
-{
-    return Xil_In32(UB_BASE + 72);
-}
-uint32_t get_archive_valid_count(void)
-{
-    return Xil_In32(UB_BASE + 80) & 0xFFFF;
-}
-
 void execute_instruction(uint32_t instruction, uint16_t context_id)
 {
 #ifdef ARMR5
