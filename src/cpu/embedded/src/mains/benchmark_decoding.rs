@@ -250,8 +250,15 @@ pub fn main() {
                 }
                 primal_module.resolve(dual_module, obstacle);
                 if DBG_SOLVE_TRACE {
+                    // Poll scan FSM diagnostic registers BEFORE the find_obstacle call that
+                    // might hang. If firmware hangs after this print, the scan state at the
+                    // hang is captured in the previous line.
+                    let sa = unsafe { extern_c::get_scan_active() };
+                    let sac = unsafe { extern_c::get_scan_active_counter() };
+                    let ssc = unsafe { extern_c::get_scan_start_counter() };
+                    let avc = unsafe { extern_c::get_archive_valid_count() };
                     println!(
-                        "[dbg_solve] sample={} k={} AFTER primal_module.resolve BEFORE find_obstacle",
+                        "[dbg_solve] sample={} k={} AFTER resolve; scanActive={sa} scanActiveCtr={sac} scanStartCtr={ssc} archiveValid={avc} BEFORE find_obstacle",
                         defects_reader.count,
                         solve_iters + 1
                     );
