@@ -51,6 +51,12 @@ impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualStacklessDr
 
     fn find_obstacle(&mut self) -> (CompactObstacle, CompactWeight) {
         let mut grown = 0;
+        // Watchdog: if hardware keeps reporting GrowLength with zero or tiny local_grown
+        // (can happen when primal/hardware diverge on archived blossoms in streaming mode),
+        // bail out with `None` so the outer solve loop can terminate or hit its own
+        // watchdog. Without this, this inner loop is infinite and bypasses that watchdog.
+        const FIND_OBSTACLE_WATCHDOG: usize = 100_000;
+        let mut iters = 0;
         loop {
             let maximum_growth = if let Some((length, blossom)) = self.blossom_tracker.get_maximum_growth() {
                 if length == 0 {
@@ -66,6 +72,10 @@ impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualStacklessDr
             grown += local_grown;
             if !obstacle.is_finite_growth() {
                 return (obstacle, grown);
+            }
+            iters += 1;
+            if iters >= FIND_OBSTACLE_WATCHDOG {
+                return (CompactObstacle::None, grown);
             }
         }
     }
