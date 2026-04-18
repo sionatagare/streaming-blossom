@@ -64,11 +64,21 @@ case class MicroBlossomLooper[T <: Data](config: DualConfig, tagType: HardType[T
 
   // immediate feedback happens when the response allows immediate growth
   // when maximumGrowth is 0, the loopback is forbidden
+  //
+  // Bug fix (streaming hang observed with archiveValidCount=0 and scan FSM idle):
+  // Without the `maxGrowable.length =/= 0` check, if a tight edge reports max_growable=0
+  // but no conflict is emitted (e.g. both tight-edge endpoints are unavailable / virtual
+  // after layer fusion), the loopback fires, hardware re-processes the same state, still
+  // can't grow, still no conflict — infinite loop with the response trapped in the
+  // pipeline. CPU's find_obstacle readout hangs waiting for a response that never pops.
+  // Adding `length =/= 0` makes the response exit the loop so the CPU can observe it and
+  // decide what to do (the CPU's tracked driver handles local_grown==0 specifically).
   val elasticArchiveBusy = microBlossom.io.elasticArchivePipelineBusy
   immediateLoopback := !elasticArchiveBusy && responseEntry.valid && (
     responseEntry.isLoopBackGrow || (
       !microBlossom.io.conflict.valid &&
         (microBlossom.io.maxGrowable.length =/= microBlossom.io.maxGrowable.length.maxValue) &&
+        (microBlossom.io.maxGrowable.length =/= 0) &&
         (responseEntry.grown < responseEntry.maximumGrowth)
     )
   )
