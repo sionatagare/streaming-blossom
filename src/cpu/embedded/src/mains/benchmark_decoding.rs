@@ -74,6 +74,9 @@ pub const DISABLE_DETAIL_PRINT: bool = option_env!("DISABLE_DETAIL_PRINT").is_so
 /// streaming mode: each measurement is loaded, solved, and archived individually
 /// without a full reset between rounds; primal state persists across measurements
 pub const USE_STREAMING: bool = option_env!("USE_STREAMING").is_some();
+/// Per-sample phase markers for streaming hangs (`[dbg_streaming] …`). UART-heavy; enable only
+/// when debugging, e.g. `STREAMING_DBG_STEPS=1` in the env passed to `make` for embedded.
+pub const STREAMING_DBG_STEPS: bool = option_env!("STREAMING_DBG_STEPS").is_some();
 
 static mut PRIMAL_MODULE: UnsafeCell<PrimalModuleEmbedded<MAX_NODE_NUM, MAX_VERTEX_NUM>> = UnsafeCell::new(PrimalModuleEmbedded::new());
 static mut DUAL_MODULE: UnsafeCell<DualModuleStackless<DualDriverTracked<DualDriver, MAX_NODE_NUM>>> =
@@ -92,6 +95,7 @@ pub fn main() {
     println!("MAX_ROUND: {MAX_ROUND:?}");
     println!("DISABLE_DETAIL_PRINT: {DISABLE_DETAIL_PRINT:?}");
     println!("USE_STREAMING: {USE_STREAMING:?}");
+    println!("STREAMING_DBG_STEPS: {STREAMING_DBG_STEPS:?}");
     println!("-------- end of build parameters --------");
 
     // obtain hardware information
@@ -204,11 +208,26 @@ pub fn main() {
 
             let fast_start = unsafe { extern_c::get_fast_cpu_time() };
 
+            if STREAMING_DBG_STEPS {
+                println!(
+                    "[dbg_streaming] sample={} defects={} after_stall -> first find_obstacle",
+                    defects_reader.count,
+                    num_defects
+                );
+            }
+
             // Solve until no obstacle remains. Watchdog to escape solver hangs on pathological
             // defect patterns (rare stale archive/primal divergence — see primal_module_embedded.rs
             // obstacle_potentially_outdated paths). Normal solves are 2-10 iterations.
             const SOLVE_WATCHDOG: usize = 10_000;
             let (mut obstacle, _) = dual_module.find_obstacle();
+            if STREAMING_DBG_STEPS {
+                println!(
+                    "[dbg_streaming] sample={} first find_obstacle done is_none={}",
+                    defects_reader.count,
+                    obstacle.is_none()
+                );
+            }
             let mut solve_iters: usize = 0;
             let mut watchdog_fired = false;
             while !obstacle.is_none() {
@@ -225,6 +244,13 @@ pub fn main() {
                 }
             }
 
+            if STREAMING_DBG_STEPS {
+                println!(
+                    "[dbg_streaming] sample={} solve_iters={} watchdog_fired={}",
+                    defects_reader.count, solve_iters, watchdog_fired
+                );
+            }
+
             if watchdog_fired {
                 primal_module.reset();
                 dual_module.reset();
@@ -233,8 +259,20 @@ pub fn main() {
                 continue;
             }
 
+            if STREAMING_DBG_STEPS {
+                println!(
+                    "[dbg_streaming] sample={} pre archive_elastic_slice",
+                    defects_reader.count
+                );
+            }
             // Archive: shifts layer state down, resets top layer for next measurement
             dual_module.archive_elastic_slice();
+            if STREAMING_DBG_STEPS {
+                println!(
+                    "[dbg_streaming] sample={} post archive_elastic_slice",
+                    defects_reader.count
+                );
+            }
 
             let native_after_archive = unsafe { extern_c::get_native_time() };
             let hardware_diff =

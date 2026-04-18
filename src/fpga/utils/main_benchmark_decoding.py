@@ -451,6 +451,8 @@ class DecodingSpeedBenchmarkerBasic:
             if not self.enable_detailed_print:
                 make_env["DISABLE_DETAIL_PRINT"] = "1"
             make_env["EMBEDDED_BLOSSOM_MAIN"] = "benchmark_decoding"
+            if os.environ.get("STREAMING_DBG_STEPS"):
+                make_env["STREAMING_DBG_STEPS"] = os.environ["STREAMING_DBG_STEPS"]
             project.build_embedded_binary(make_env)
             project.build_vivado_project(force_recompile_binary=True)
             assert not project.timing_sanity_check_failed()
