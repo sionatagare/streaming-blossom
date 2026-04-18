@@ -12,7 +12,7 @@ from hardware.decoding_speed.circuit_level_common import *
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
 # SAMPLES = 10_000  # draft
-SAMPLES = 50_000  # final — capped below the ~58985 threshold where streaming
+SAMPLES = 1_00_000  # final — capped below the ~58985 threshold where streaming
                   # solver enters a stale-state it can't recover from via soft reset
                   # (hardware registers like liveConflictReg/accConflict/archivedRegs
                   # survive the RESET instruction; fixing would require RTL work).
