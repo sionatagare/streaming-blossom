@@ -161,11 +161,33 @@ pub fn main() {
 
             let fast_start = unsafe { extern_c::get_fast_cpu_time() };
 
-            // Solve until no obstacle remains
+            // Solve until no obstacle remains. Watchdog to escape solver hangs on pathological
+            // defect patterns (rare stale archive/primal divergence — see primal_module_embedded.rs
+            // obstacle_potentially_outdated paths). Normal solves are 2-10 iterations.
+            const SOLVE_WATCHDOG: usize = 10_000;
             let (mut obstacle, _) = dual_module.find_obstacle();
+            let mut solve_iters: usize = 0;
+            let mut watchdog_fired = false;
             while !obstacle.is_none() {
                 primal_module.resolve(dual_module, obstacle);
                 (obstacle, _) = dual_module.find_obstacle();
+                solve_iters += 1;
+                if solve_iters >= SOLVE_WATCHDOG {
+                    watchdog_fired = true;
+                    println!(
+                        "[warn] solve watchdog at sample {}; reset+continue",
+                        defects_reader.count
+                    );
+                    break;
+                }
+            }
+
+            if watchdog_fired {
+                primal_module.reset();
+                dual_module.reset();
+                streaming_node_offset = 0;
+                streaming_round_count = 0;
+                continue;
             }
 
             // Archive: shifts layer state down, resets top layer for next measurement
