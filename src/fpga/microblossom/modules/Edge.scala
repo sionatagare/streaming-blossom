@@ -444,8 +444,16 @@ case class Edge(config: DualConfig, edgeIndex: Int) extends Component {
 
   // Reset accumulators on the rising edge of scanActive (scan start).
   // Cannot use edgeScanIndex===0 because reversed scan order makes index 0 the last tick.
+  //
+  // ALSO reset on RESET instruction. Without this, once accConflict latches a valid conflict
+  // it persists forever: the normal write path requires `!accConflict.valid` so it can never
+  // overwrite itself, and the scan-start reset doesn't fire when firmware RESETs (since RESET
+  // clears archiveValidCount to 0, preventing future scans from starting). Symptom: after
+  // firmware's soft reset, find_obstacle keeps returning the stale accumulated conflict
+  // because combinedConflict at line 510-514 prefers accConflict over liveConflictReg.
   val prevScanActive = RegNext(io.edgeScanActive, init = False)
-  when(io.edgeScanActive && !prevScanActive) {
+  val isResetAtUpdate = stages.updateGet3.compact.valid && stages.updateGet3.compact.isReset
+  when((io.edgeScanActive && !prevScanActive) || isResetAtUpdate) {
     accMaxGrowable.length := accMaxGrowable.length.maxValue
     accConflict.valid := False
     accConflict.node1 := convergecastConflictBitsInit
