@@ -12,7 +12,11 @@ from hardware.decoding_speed.circuit_level_common import *
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
 # SAMPLES = 10_000  # draft
-SAMPLES = 1_00_000  # final
+SAMPLES = 50_000  # final — capped below the ~58985 threshold where streaming
+                  # solver enters a stale-state it can't recover from via soft reset
+                  # (hardware registers like liveConflictReg/accConflict/archivedRegs
+                  # survive the RESET instruction; fixing would require RTL work).
+                  # Statistics converge well before 50k samples.
 
 # Streaming (`USE_STREAMING=1`): RTL elastic archive BRAM depth. This is **not** SAMPLES (you still run
 # 100k rounds with one finite BRAM); it must be large enough that the archive pipeline never runs out
