@@ -268,6 +268,14 @@ pub fn main() {
             if watchdog_fired {
                 primal_module.reset();
                 dual_module.reset();
+                // Pipeline hazard: the RESET instruction takes ~10 cycles to propagate through
+                // the vertex pipeline before its writeback hits the live register. If a subsequent
+                // instruction (e.g. the next sample's add_defect) enters the pipeline before that
+                // writeback, it reads the PRE-reset register value and writes it BACK, overwriting
+                // the reset's effect for every vertex it doesn't target. Result: RESET is neutralised.
+                // Force a pipeline drain by issuing a find_obstacle read, which blocks on the AXI
+                // readout state machine until all pending instructions have completed.
+                let _ = dual_module.find_obstacle();
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
                 continue;
@@ -299,6 +307,9 @@ pub fn main() {
             if streaming_round_count >= ARCHIVE_DEPTH || streaming_node_offset > MAX_STREAMING_NODE_OFFSET {
                 primal_module.reset();
                 dual_module.reset();
+                // Drain the pipeline before the next sample's instructions enter — see the
+                // watchdog path for the explanation of this pipeline hazard.
+                let _ = dual_module.find_obstacle();
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
             }
