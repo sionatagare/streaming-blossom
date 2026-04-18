@@ -418,6 +418,23 @@ class DecodingSpeedBenchmarkerBasic:
                         np.array(filtered, dtype=np.uint32).tofile(dest_file_path)
                         print(f"[streaming] filtered defects to {len(top_vertices)} top-layer vertices "
                               f"({len(values)} -> {len(filtered)} entries)")
+                        # Also emit vertex->layer mapping so firmware primal can track layer fusion.
+                        # Format: u16 vertex_num, then `vertex_num` bytes where byte[v] = layer_id+1
+                        # (0 means "no layer"). Firmware reads this at boot to populate
+                        # `layer_fusion.vertex_layer_id`. Without this, streaming can't break
+                        # virtual-boundary matchings when layers cycle in, causing solver hangs.
+                        vertex_num = graph_data.get("vertex_num", 0)
+                        layer_bytes = bytearray(2 + vertex_num)
+                        layer_bytes[0] = vertex_num & 0xFF
+                        layer_bytes[1] = (vertex_num >> 8) & 0xFF
+                        for layer_id, vertices in enumerate(lf["layers"]):
+                            for v in vertices:
+                                if v < vertex_num:
+                                    layer_bytes[2 + v] = layer_id + 1  # +1 so 0 means None
+                        layer_ids_path = os.path.join(embedded_dir, "embedded.layer_ids")
+                        with open(layer_ids_path, "wb") as f:
+                            f.write(layer_bytes)
+                        print(f"[streaming] wrote layer mapping for {vertex_num} vertices")
             # build the project
             project = self.configuration.optimized_project()
             project.create_vivado_project(update=True)  # update c files
