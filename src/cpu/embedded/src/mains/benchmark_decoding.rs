@@ -240,8 +240,8 @@ pub fn main() {
                         stale_streak += 1;
                         if stale_streak >= 3 {
                             println!(
-                                "[warn] stale-conflict streak at sample {}; reset+continue",
-                                defects_reader.count
+                                "[warn] stale-conflict streak at sample {} conflict=(n1={},n2={},v1={},v2={}); reset+continue",
+                                defects_reader.count, fp.0, fp.1, fp.2, fp.3
                             );
                             watchdog_fired = true;
                             break;
