@@ -267,17 +267,19 @@ pub fn main() {
 
             if watchdog_fired {
                 primal_module.reset();
-                dual_module.reset();
-                // Pipeline hazard: a subsequent instruction reads the PRE-reset register
-                // value and writes it BACK after RESET's writeback, neutralising the reset.
-                // Any new instruction (including find_obstacle) hits the same hazard.
-                // Only fix without RTL change is to spin-wait long enough for RESET's writeback
-                // to have fully landed (~10 pipeline stages × ~6ns = 60ns; use 500ns to be safe).
-                let wait_start = unsafe { extern_c::get_native_time() };
-                while unsafe { extern_c::diff_native_time(wait_start, extern_c::get_native_time()) }
-                    < 100e-6_f32
-                {
-                    spin_loop();
+                // Issue RESET twice with a wait between. The second RESET acts as a "shadow"
+                // that overwrites any stale state that a straggler instruction's writeback
+                // may have introduced after the first RESET's writeback. Spin-wait between
+                // each to let the pipeline fully drain. If this fixes the hang, the bug is
+                // definitively the pipeline writeback hazard.
+                for _ in 0..3 {
+                    dual_module.reset();
+                    let wait_start = unsafe { extern_c::get_native_time() };
+                    while unsafe { extern_c::diff_native_time(wait_start, extern_c::get_native_time()) }
+                        < 100e-6_f32
+                    {
+                        spin_loop();
+                    }
                 }
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
