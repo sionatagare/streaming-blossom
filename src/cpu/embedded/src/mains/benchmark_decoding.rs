@@ -268,14 +268,17 @@ pub fn main() {
             if watchdog_fired {
                 primal_module.reset();
                 dual_module.reset();
-                // Pipeline hazard: the RESET instruction takes ~10 cycles to propagate through
-                // the vertex pipeline before its writeback hits the live register. If a subsequent
-                // instruction (e.g. the next sample's add_defect) enters the pipeline before that
-                // writeback, it reads the PRE-reset register value and writes it BACK, overwriting
-                // the reset's effect for every vertex it doesn't target. Result: RESET is neutralised.
-                // Force a pipeline drain by issuing a find_obstacle read, which blocks on the AXI
-                // readout state machine until all pending instructions have completed.
-                let _ = dual_module.find_obstacle();
+                // Pipeline hazard: a subsequent instruction reads the PRE-reset register
+                // value and writes it BACK after RESET's writeback, neutralising the reset.
+                // Any new instruction (including find_obstacle) hits the same hazard.
+                // Only fix without RTL change is to spin-wait long enough for RESET's writeback
+                // to have fully landed (~10 pipeline stages × ~6ns = 60ns; use 500ns to be safe).
+                let wait_start = unsafe { extern_c::get_native_time() };
+                while unsafe { extern_c::diff_native_time(wait_start, extern_c::get_native_time()) }
+                    < 500e-9_f32
+                {
+                    spin_loop();
+                }
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
                 continue;
@@ -307,9 +310,13 @@ pub fn main() {
             if streaming_round_count >= ARCHIVE_DEPTH || streaming_node_offset > MAX_STREAMING_NODE_OFFSET {
                 primal_module.reset();
                 dual_module.reset();
-                // Drain the pipeline before the next sample's instructions enter — see the
-                // watchdog path for the explanation of this pipeline hazard.
-                let _ = dual_module.find_obstacle();
+                // Spin-wait for RESET's writeback to land (see watchdog path).
+                let wait_start = unsafe { extern_c::get_native_time() };
+                while unsafe { extern_c::diff_native_time(wait_start, extern_c::get_native_time()) }
+                    < 500e-9_f32
+                {
+                    spin_loop();
+                }
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
             }
