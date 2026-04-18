@@ -26,16 +26,6 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     val maxGrowable = out(ConvergecastMaxGrowable(ioConfig.weightBits))
     val conflict = out(ConvergecastConflict(ioConfig.vertexBits))
     val parityReports = out(Bits(config.parityReportersNum bits))
-
-    /** Diagnostic: cycles spent with scanActive asserted since the last isReset.
-      * Firmware polls this to distinguish "scan FSM locked" (counter stops incrementing while
-      * firmware is hung) from "scan re-triggered repeatedly" (counter grows fast). Wraps naturally.
-      */
-    val scanActiveCounter = out(UInt(32 bits))
-    /** Diagnostic: total number of scan starts since last isReset. */
-    val scanStartCounter = out(UInt(32 bits))
-    /** Diagnostic: current archiveValidCount (runtime archive fill level). */
-    val archiveValidCountOut = out(UInt(16 bits))
   }
 
   // width conversion
@@ -145,13 +135,6 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
 
   val archiveCommitEn = Bool()
 
-  // Fields for simPublic access — set inside the elastic if-branch.
-  var diagScanActive: Bool = null
-  var diagScanTick: UInt = null
-  var diagArchiveValidCount: UInt = null
-  var diagScanActiveCounter: UInt = null
-  var diagScanStartCounter: UInt = null
-
   if (firstLayerVertexIndices.nonEmpty) {
     val warmupThreshold = config.numLayers.toInt - 1  // shifts needed before data reaches layer 0
 
@@ -193,33 +176,6 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       archiveWriteCounter := 0
       archiveValidCount := 0
     }
-
-    // Diagnostic counters for debugging scan-stuck hangs.
-    // scanActiveCounter: cycles with scanActive high since last isReset.
-    // scanStartCounter: number of times scanActive transitioned from low to high.
-    val scanActiveCounter = Reg(UInt(32 bits)) init 0
-    val scanStartCounter = Reg(UInt(32 bits)) init 0
-    val scanActivePrev = RegNext(scanActive) init False
-    when(scanActive) {
-      scanActiveCounter := scanActiveCounter + 1
-    }
-    when(scanActive && !scanActivePrev) {
-      scanStartCounter := scanStartCounter + 1
-    }
-    when(broadcastRegInserted.valid && broadcastRegInserted.instruction.isReset()) {
-      scanActiveCounter := 0
-      scanStartCounter := 0
-    }
-    io.scanActiveCounter := scanActiveCounter
-    io.scanStartCounter := scanStartCounter
-    io.archiveValidCountOut := archiveValidCount.resize(16)
-
-    // Expose for simPublic (waveform visibility).
-    diagScanActive = scanActive
-    diagScanTick = scanTick
-    diagArchiveValidCount = archiveValidCount
-    diagScanActiveCounter = scanActiveCounter
-    diagScanStartCounter = scanStartCounter
 
     archiveCommitEn := warmupDone && (archiveValidCount < config.archiveDepth)
 
@@ -282,9 +238,6 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     scanWritebackEn := False
     scanWritebackIndex := U(0, config.archiveAddressBits bits)
     io.elasticArchivePipelineBusy := False
-    io.scanActiveCounter := U(0, 32 bits)
-    io.scanStartCounter := U(0, 32 bits)
-    io.archiveValidCountOut := U(0, 16 bits)
     broadcastMessage.valid := io.message.valid
   }
 
@@ -405,14 +358,6 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
   // before compiling the simulator, mark the fields as public to enable snapshot
   def simMakePublicSnapshot() = {
     io.elasticArchivePipelineBusy.simPublic()
-    // Diagnostic: expose scan FSM internals for waveform debugging.
-    if (diagScanActive != null) {
-      diagScanActive.simPublic()
-      diagScanTick.simPublic()
-      diagArchiveValidCount.simPublic()
-      diagScanActiveCounter.simPublic()
-      diagScanStartCounter.simPublic()
-    }
     vertices.foreach(vertex => {
       vertex.register.simPublic()
       vertex.io.simPublic()

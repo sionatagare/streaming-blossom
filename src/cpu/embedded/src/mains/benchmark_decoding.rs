@@ -227,20 +227,6 @@ pub fn main() {
             let mut stale_streak: u32 = 0;
             while !obstacle.is_none() {
                 primal_module.resolve(dual_module, obstacle);
-                if DBG_SOLVE_TRACE {
-                    // Poll scan FSM diagnostic registers BEFORE the find_obstacle call that
-                    // might hang. If firmware hangs after this print, the scan state at the
-                    // hang is captured in the previous line.
-                    let sa = unsafe { extern_c::get_scan_active() };
-                    let sac = unsafe { extern_c::get_scan_active_counter() };
-                    let ssc = unsafe { extern_c::get_scan_start_counter() };
-                    let avc = unsafe { extern_c::get_archive_valid_count() };
-                    println!(
-                        "[dbg_solve] sample={} k={} scanActive={sa} scanActiveCtr={sac} scanStartCtr={ssc} archiveValid={avc}",
-                        defects_reader.count,
-                        solve_iters + 1
-                    );
-                }
                 (obstacle, _) = dual_module.find_obstacle();
                 // Detect a Conflict that repeats verbatim — primal can't make progress on it.
                 if let CompactObstacle::Conflict { node_1, node_2, vertex_1, vertex_2, .. } = obstacle {
