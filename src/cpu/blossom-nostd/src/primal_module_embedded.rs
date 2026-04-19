@@ -100,10 +100,22 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                     );
                     cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                         if node_1 == node_2 {
+                            // Re-issue set_speed to force an archive scan so HW stops
+                            // reporting the stale peer conflict (see below).
+                            dual_module.set_speed(
+                                self.nodes.is_blossom(node_1),
+                                node_1,
+                                self.nodes.get_grow_state(node_1),
+                            );
                             return true; // outdated event: already in the same blossom
                         }
                         if !CompactGrowState::is_conflicting(
                                 self.nodes.get_grow_state(node_1), self.nodes.get_grow_state(node_2)) {
+                            dual_module.set_speed(
+                                self.nodes.is_blossom(node_1),
+                                node_1,
+                                self.nodes.get_grow_state(node_1),
+                            );
                             return true; // outdated event
                         }
                     } }
@@ -111,6 +123,17 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                 } else {
                     cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                         if self.nodes.get_grow_state(node_1) != CompactGrowState::Grow {
+                            // Without this, the boundary conflict stays latched in
+                            // Edge.accConflict across subsequent FindObstacle reads
+                            // (FindObstacle doesn't trigger needsArchivedScan()), so
+                            // the firmware sees the same stale event 3× and fires
+                            // its watchdog. Re-issuing set_speed with the current
+                            // state triggers a scan that refreshes the archive.
+                            dual_module.set_speed(
+                                self.nodes.is_blossom(node_1),
+                                node_1,
+                                self.nodes.get_grow_state(node_1),
+                            );
                             return true; // outdated event
                         }
                     } }
