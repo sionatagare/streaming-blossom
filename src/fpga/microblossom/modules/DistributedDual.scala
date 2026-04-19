@@ -153,6 +153,21 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     val scanTickWidth = config.archiveAddressBits + log2Up(config.executeLatency + fusionExtra + 1) + 1
     val scanTick = Reg(UInt(scanTickWidth bits)) init 0
 
+    // Active-layer range tracker. Active set is the contiguous range {1..activeDepth}
+    // where layer 1 = newest archive slot (bottom of BRAM, just below live) and
+    // layer archiveValidCount = oldest. Rules:
+    //   - Every state-modifying instruction scans {1..effectiveDepth}. If ANY vertex
+    //     in the scan scope had its archivedState actually change this scan, the
+    //     layer below the current range activates — activeDepth := effectiveDepth.
+    //     If nothing actually changed (e.g. SetSpeed target not in any scanned slot),
+    //     activeDepth stays put.
+    //   - RESET / archive_elastic_slice (new slot shifts in): activeDepth := 0
+    //     (the next SM instruction re-bootstraps from layer 1).
+    val activeDepthWidth = config.archiveAddressBits + 2
+    val activeDepth = Reg(UInt(activeDepthWidth bits)) init 0
+    // OR of every elastic vertex's archivedChanged, latched during scanActive.
+    val scanDidModify = Reg(Bool()) init False
+
     val isArchiveSlice =
       broadcastRegInserted.valid &&
         broadcastRegInserted.instruction.isArchiveElasticSlice()
@@ -167,55 +182,80 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       when(warmupDone && (archiveValidCount < config.archiveDepth)) {
         archiveWriteCounter := archiveWriteCounter + 1
         archiveValidCount := archiveValidCount + 1
+        // new slot shifted in at bottom; previous layer numbering is invalidated —
+        // reset the active range and let the next SM instruction start from layer 1
+        activeDepth := 0
       }
     }
 
-    // On Reset: clear all archive state
+    // On Reset: clear all archive state and the active-layer tracker
     when(broadcastRegInserted.valid && broadcastRegInserted.instruction.isReset()) {
       archiveTotalCount := 0
       archiveWriteCounter := 0
       archiveValidCount := 0
+      activeDepth := 0
     }
 
     archiveCommitEn := warmupDone && (archiveValidCount < config.archiveDepth)
 
+    // Scan depth = currently-active range {1..activeDepth}, bootstrapped to 1 on first
+    // SM instruction (layer 1 is re-activated by every live change), saturated at
+    // archiveValidCount. NO speculative probe beyond activeDepth.
+    val activeOrOne = Mux(activeDepth === 0, U(1, activeDepthWidth bits), activeDepth)
+    val effectiveDepth = Mux(
+      activeOrOne > archiveValidCount.resize(activeDepthWidth),
+      archiveValidCount.resize(activeDepthWidth),
+      activeOrOne
+    )
+    val hasScan = archiveValidCount > 0
+
     /*
-     * State machine (no mirror walk — the pipeline handles everything):
+     * Scan FSM:
      *   idle: instruction enters live pipeline
-     *     - If affects archived state && archiveValidCount > 0: start scan
-     *     - Block next instruction until scan completes
-     *   edgeScan: feed scan indices 0..archiveValidCount-1 into pipeline (1 per cycle)
-     *     - Then drain executeLatency-1 cycles for last result to exit
-     *     - Writeback: as each scan result exits the pipeline, write archivedState back to regs + BRAM
-     *     - When done → idle
+     *     - If needsArchivedScan && archiveValidCount > 0: start scan over {1..effectiveDepth}
+     *   scan: feed effectiveDepth indices (reverse order, newest first), then drain
+     *     - On completion: activeDepth := effectiveDepth (range now includes all scanned layers,
+     *       plus implicitly "next layer below" which cascades on the next instruction)
      */
-    when(affectsArchive && !scanActive && (archiveValidCount > 0)) {
+    when(affectsArchive && !scanActive && hasScan) {
       scanActive := True
       scanTick := 0
+      scanDidModify := False
     }
 
-    // Edge scan: feed archiveValidCount indices, then drain for pipeline + fusion delay.
-    val scanEndTick = archiveValidCount.resize(scanTickWidth) + U(((config.executeLatency + fusionExtra - 1) max 0), scanTickWidth bits)
+    // End of scan: effectiveDepth feed ticks + drain (executeLatency + fusionExtra - 1)
+    val scanEndTick = effectiveDepth.resize(scanTickWidth) + U((config.executeLatency + fusionExtra - 1) max 0, scanTickWidth bits)
     when(scanActive) {
       when(scanTick === scanEndTick) {
         scanActive := False
+        // Range grew iff the DEEPEST scanned layer (tick effectiveDepth-1) was modified.
+        // Per the active-set rule: "modifying an active layer activates the layer below",
+        // only modification at layer activeDepth (the deepest in-set) grows the range.
+        when(scanDidModify && (effectiveDepth < archiveValidCount.resize(activeDepthWidth))) {
+          activeDepth := effectiveDepth + 1
+        }
       } otherwise {
         scanTick := scanTick + 1
       }
     }
 
-    // Scan input index: the register file index being fed into the pipeline this cycle
-    // Only valid when scanTick < archiveValidCount (feeding phase, not drain phase)
-    val scanFeeding = scanActive && (scanTick < archiveValidCount.resize(scanTickWidth))
+    // Feed phase: effectiveDepth ticks. Reverse order (newest first, matching existing convention).
+    val scanFeeding = scanActive && (scanTick < effectiveDepth.resize(scanTickWidth))
 
-    // Writeback: results exit the pipeline executeLatency cycles after being fed in.
-    // The scan index that entered at tick T exits at tick T + executeLatency.
+    // Writeback: each feed at tick T produces a writeback at tick T + executeLatency.
     val writebackTick = scanTick - U(config.executeLatency, scanTickWidth bits)
     val writebackValid = scanActive && (scanTick >= U(config.executeLatency, scanTickWidth bits)) &&
-      (writebackTick < archiveValidCount.resize(scanTickWidth))
+      (writebackTick < effectiveDepth.resize(scanTickWidth))
 
-    // Reverse scan order: most recent entry (highest address) first.
-    // This ensures fusion edges see the temporally adjacent archived pair first.
+    // Latch "deepest active layer was modified" iff any elastic vertex's writeback at the
+    // last-fed tick (writebackTick === effectiveDepth - 1) actually alters BRAM state.
+    val anyArchivedChanged = vertices.map(_.io.archivedChanged).reduceBalancedTree(_ || _)
+    val deepestTick = effectiveDepth.resize(scanTickWidth) - U(1, scanTickWidth bits)
+    when(scanActive && writebackValid && (writebackTick === deepestTick) && anyArchivedChanged) {
+      scanDidModify := True
+    }
+
+    // Reverse scan: newest slot (archiveValidCount-1) first, walking up toward slot 0 (oldest).
     val reversedScanIndex = (archiveValidCount - 1).resize(scanTickWidth) - scanTick
     val reversedWritebackIndex = (archiveValidCount - 1).resize(scanTickWidth) - writebackTick
 
@@ -2279,6 +2319,255 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         println("ArchiveElasticSlice no-scan test passed")
         for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
       }
+  }
+
+  // ---------- Active-layer scan tests ----------
+
+  // Helper: run enough archive cycles to saturate archiveValidCount = archiveDepth.
+  private def fillArchiveToFull(dut: DistributedDual, config: DualConfig, ioConfig: DualConfig): Int = {
+    val rounds = (config.numLayers.toInt - 1) + config.archiveDepth
+    for (r <- 0 until rounds) {
+      dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, r))
+      dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
+      dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+      dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+      sleep(1)
+    }
+    rounds
+  }
+
+  test("first SM instruction after archive reset touches only layer 1") {
+    // After fillArchiveToFull the last archive_elastic_slice resets activeDepth to 0.
+    // The next SM instruction's scan covers effectiveDepth = min(0+1, archiveValidCount) = 1.
+    // Only slot archiveValidCount-1 (= slot 3 = newest) should receive the update.
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testFirstScanOneSlot") { dut =>
+      dut.io.message.valid #= false
+      dut.clockDomain.forkStimulus(period = 10)
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+      dut.simExecute(ioConfig.instructionSpec.generateReset())
+      fillArchiveToFull(dut, config, ioConfig)
+
+      val grownBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      val speedsBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).speed.toLong)
+      println(s"Before Grow: grown=$grownBefore speeds=$speedsBefore")
+
+      dut.simExecute(ioConfig.instructionSpec.generateGrow(5))
+      sleep(2)
+
+      val grownAfter = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      println(s"After Grow(5): grown=$grownAfter")
+
+      for (i <- 0 until 4) {
+        val delta = grownAfter(i) - grownBefore(i)
+        val expected =
+          if (i == 3 && speedsBefore(i) == Speed.Grow) 5
+          else 0
+        assert(delta == expected,
+          s"slot $i: expected delta=$expected, got $delta (speed=${speedsBefore(i)})")
+      }
+      println("First-scan-one-slot test passed")
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+    }
+  }
+
+  test("active range grows by 1 per scan that actually modifies state") {
+    // Issue three back-to-back Grows. Each modifies the currently-active range
+    // (Grow applies to every speed=Grow vertex), so activeDepth grows by 1 each time.
+    //   Scan 1: activeDepth 0→1, covers slot 3
+    //   Scan 2: activeDepth 1→2, covers slots 3,2
+    //   Scan 3: activeDepth 2→3, covers slots 3,2,1
+    // Net delta per slot from three Grow(1)s: slot 3 → +3, slot 2 → +2, slot 1 → +1, slot 0 → 0.
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testActiveRangeGrowsOnModify") { dut =>
+      dut.io.message.valid #= false
+      dut.clockDomain.forkStimulus(period = 10)
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+      dut.simExecute(ioConfig.instructionSpec.generateReset())
+      fillArchiveToFull(dut, config, ioConfig)
+
+      val grownBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      val speedsBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).speed.toLong)
+      println(s"Before 3 Grows: grown=$grownBefore speeds=$speedsBefore")
+
+      for (_ <- 0 until 3) {
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+        sleep(2)
+      }
+
+      val grownAfter = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      println(s"After 3 Grows: grown=$grownAfter")
+
+      // Slot i gets Grow(1) applied once per scan that covers it.
+      // Coverage pattern: slot 3 ∈ {scan1, scan2, scan3}, slot 2 ∈ {scan2, scan3},
+      // slot 1 ∈ {scan3}, slot 0 ∈ {}.
+      val expectedDeltas = Seq(0, 1, 2, 3)
+      for (i <- 0 until 4) {
+        val delta = grownAfter(i) - grownBefore(i)
+        val expected = if (speedsBefore(i) == Speed.Grow) expectedDeltas(i) else 0
+        assert(delta == expected,
+          s"slot $i: after 3 Grows, expected delta=$expected got $delta (speed=${speedsBefore(i)})")
+      }
+      println("Active range grows on modify test passed")
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+    }
+  }
+
+  test("active range does NOT grow when scan modifies nothing") {
+    // A SetSpeed targeting a node that exists in NO archived slot changes nothing.
+    // scanDidModify stays False → activeDepth stays. Next Grow should therefore
+    // cover the same 1-slot window as before (only slot 3 advances).
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testNoGrowthWithoutModification") { dut =>
+      dut.io.message.valid #= false
+      dut.clockDomain.forkStimulus(period = 10)
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+      dut.simExecute(ioConfig.instructionSpec.generateReset())
+      fillArchiveToFull(dut, config, ioConfig)
+
+      // Pick a phantom node guaranteed NOT to exist in any archived slot.
+      val presentNodes = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).node.toLong).toSet
+      val phantom = (0 until 256).find(n => !presentNodes.contains(n.toLong)).get.toLong
+      println(s"Present archived nodes: $presentNodes, using phantom=$phantom")
+
+      // Two phantom SetSpeeds: should scan layer 1 each time (since activeDepth=0→0),
+      // find no matching vertex, scanDidModify stays False, activeDepth stays 0.
+      dut.simExecute(ioConfig.instructionSpec.generateSetSpeed(phantom, Speed.Stay))
+      sleep(2)
+      dut.simExecute(ioConfig.instructionSpec.generateSetSpeed(phantom, Speed.Stay))
+      sleep(2)
+
+      val grownBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      val speedsBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).speed.toLong)
+      println(s"Before probe Grow: grown=$grownBefore speeds=$speedsBefore")
+
+      dut.simExecute(ioConfig.instructionSpec.generateGrow(4))
+      sleep(2)
+
+      val grownAfter = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      println(s"After probe Grow(4): grown=$grownAfter")
+
+      // Only slot 3 should have moved (activeDepth still at 0, effectiveDepth=1).
+      for (i <- 0 until 4) {
+        val delta = grownAfter(i) - grownBefore(i)
+        val expected = if (i == 3 && speedsBefore(i) == Speed.Grow) 4 else 0
+        assert(delta == expected,
+          s"slot $i: after 2 no-op SetSpeeds then Grow(4), expected delta=$expected got $delta")
+      }
+      println("No growth without modification test passed")
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+    }
+  }
+
+  test("archive_elastic_slice resets activeDepth") {
+    // Walk activeDepth via 2 real Grows, then archive_elastic_slice. The next SM
+    // instruction should scan only the new newest slot (activeDepth=0 again).
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testArchiveResetActiveDepth") { dut =>
+      dut.io.message.valid #= false
+      dut.clockDomain.forkStimulus(period = 10)
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+      dut.simExecute(ioConfig.instructionSpec.generateReset())
+      fillArchiveToFull(dut, config, ioConfig)
+
+      // Two Grows → activeDepth grows to 2.
+      dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+      sleep(2)
+      dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+      sleep(2)
+
+      // New archive_elastic_slice: archiveValidCount already saturated at 4, but
+      // per current RTL we still reset activeDepth only when the commit actually fires
+      // (archiveValidCount < archiveDepth). At saturation the slice is a no-op, so
+      // activeDepth is NOT reset. This test checks the COMMITTING case: bring
+      // archiveValidCount back to <archiveDepth by issuing RESET and filling to <full,
+      // then do archive_elastic_slice that DOES commit.
+      dut.simExecute(ioConfig.instructionSpec.generateReset())
+      // Fill to archiveValidCount = 2 (not saturated).
+      for (r <- 0 until (config.numLayers.toInt - 1 + 2)) {
+        dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, r))
+        dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+        dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+        sleep(1)
+      }
+      // Now archiveValidCount=2. Walk activeDepth: 1 Grow → activeDepth=1.
+      dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+      sleep(2)
+
+      // archive_elastic_slice that commits (arCnt goes 2→3). Should reset activeDepth to 0.
+      dut.simExecute(ioConfig.instructionSpec.generateAddDefect(24, 99))
+      dut.simExecute(ioConfig.instructionSpec.generateLoadDefectsExternal(3))
+      dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+      dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
+      sleep(2)
+      // arCnt is now 3.
+
+      val grownBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      val speedsBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).speed.toLong)
+      println(s"After reset + fill + archive: grown=$grownBefore speeds=$speedsBefore")
+
+      dut.simExecute(ioConfig.instructionSpec.generateGrow(3))
+      sleep(2)
+
+      val grownAfter = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      println(s"After post-commit Grow(3): grown=$grownAfter")
+
+      // archiveValidCount=3. activeDepth was just reset to 0. effectiveDepth=1.
+      // Only slot (archiveValidCount-1)=2 should advance. Slots 0,1,3 unchanged.
+      for (i <- 0 until 4) {
+        val delta = grownAfter(i) - grownBefore(i)
+        val expected = if (i == 2 && speedsBefore(i) == Speed.Grow) 3 else 0
+        assert(delta == expected,
+          s"slot $i: after archive-commit reset, expected delta=$expected got $delta")
+      }
+      println("archive_elastic_slice resets activeDepth test passed")
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+    }
+  }
+
+  test("active range saturates at archiveValidCount") {
+    // After enough Grows, activeDepth should saturate at archiveValidCount.
+    // Further Grows scan the entire range (all archiveValidCount slots).
+    val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
+    compiled.doSim("testActiveRangeSaturates") { dut =>
+      dut.io.message.valid #= false
+      dut.clockDomain.forkStimulus(period = 10)
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+
+      dut.simExecute(ioConfig.instructionSpec.generateReset())
+      fillArchiveToFull(dut, config, ioConfig)
+
+      // 4 Grows brings activeDepth to 4 (= archiveValidCount). Next scan covers all 4 slots.
+      for (_ <- 0 until config.archiveDepth) {
+        dut.simExecute(ioConfig.instructionSpec.generateGrow(1))
+        sleep(2)
+      }
+
+      val grownBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      val speedsBefore = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).speed.toLong)
+      println(s"After $getClass-saturating Grows: grown=$grownBefore speeds=$speedsBefore")
+
+      dut.simExecute(ioConfig.instructionSpec.generateGrow(2))
+      sleep(2)
+
+      val grownAfter = (0 until 4).map(i => dut.vertices(0).archivedRegs(i).grown.toLong)
+      println(s"After saturated Grow(2): grown=$grownAfter")
+
+      // Saturated range = all 4 slots. Every Grow-speed slot should advance by 2.
+      for (i <- 0 until 4) {
+        val delta = grownAfter(i) - grownBefore(i)
+        val expected = if (speedsBefore(i) == Speed.Grow) 2 else 0
+        assert(delta == expected,
+          s"slot $i: at saturation, expected delta=$expected got $delta")
+      }
+      println("Active range saturates test passed")
+      for (_ <- 0 to 10) { dut.clockDomain.waitSampling() }
+    }
   }
 
   // ---------- Deeper correctness tests ----------

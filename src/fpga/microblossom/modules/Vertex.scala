@@ -82,6 +82,10 @@ case class Vertex(
     /** Scan writeback: the scan index that just exited the pipeline, and enable. */
     val scanWritebackIndex = in UInt (config.archiveAddressBits bits)
     val scanWritebackEn = in(Bool())
+    // True when this cycle's archivedPostExecute actually altered archivedState
+    // (the captured instruction produced a change). Used by DistributedDual to
+    // gate activeDepth advancement in the windowed-scan design.
+    val archivedChanged = out(Bool())
     // final outputs
     val maxGrowable = out(ConvergecastMaxGrowable(config.weightBits))
   }
@@ -204,6 +208,10 @@ case class Vertex(
         archivedPostExecute.io.isStalled := False
       }
       stages.executeSet2.archivedState := archivedPostExecute.io.after
+      // archivedChanged is computed later at the writeback stage so it aligns with
+      // scanWritebackEn / writebackTick (see below).
+    } else {
+      io.archivedChanged := False
     }
   }
 
@@ -369,6 +377,9 @@ case class Vertex(
       // Writeback from pipeline: archivedState exits at updateGet3, write to regs + BRAM.
       val wbData = stages.updateGet3.archivedState
       val wbAddr = io.scanWritebackIndex.resize(mAddrW)
+      // archivedChanged: True this cycle iff this scan-writeback actually alters BRAM state.
+      // Aligned with scanWritebackEn so DistributedDual can gate on writebackTick.
+      io.archivedChanged := io.scanWritebackEn && (wbData.asBits =/= archivedRegs(wbAddr).asBits)
       when(io.scanWritebackEn) {
         archivedRegs(wbAddr) := wbData
         layers.write(address = wbAddr, data = wbData, enable = True)
@@ -407,6 +418,9 @@ case class Vertex(
       // Writeback from pipeline: archivedState exits at updateGet3, write to regs + BRAM.
       val wbData = stages.updateGet3.archivedState
       val wbAddr = io.scanWritebackIndex.resize(mAddrW)
+      // archivedChanged: True this cycle iff this scan-writeback actually alters BRAM state.
+      // Aligned with scanWritebackEn so DistributedDual can gate on writebackTick.
+      io.archivedChanged := io.scanWritebackEn && (wbData.asBits =/= archivedRegs(wbAddr).asBits)
       when(io.scanWritebackEn) {
         archivedRegs(wbAddr) := wbData
         layers.write(address = wbAddr, data = wbData, enable = True)
