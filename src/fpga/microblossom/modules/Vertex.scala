@@ -86,6 +86,9 @@ case class Vertex(
     // (the captured instruction produced a change). Used by DistributedDual to
     // gate activeDepth advancement in the windowed-scan design.
     val archivedChanged = out(Bool())
+    // True when this cycle's vertexPostExecuteState actually altered live state.
+    // Used by DistributedDual to activate layer 1 in the windowed-scan design.
+    val liveChanged = out(Bool())
     // final outputs
     val maxGrowable = out(ConvergecastMaxGrowable(config.weightBits))
   }
@@ -193,6 +196,10 @@ case class Vertex(
     vertexPostExecuteState.io.message := stages.executeGet.message
     vertexPostExecuteState.io.isStalled := stages.executeGet.isStalled
     stages.executeSet2.state := vertexPostExecuteState.io.after
+    // liveChanged: True this cycle iff the live pipeline actually altered state
+    // for this vertex. Only meaningful when an SM instruction is at this stage.
+    io.liveChanged := stages.executeGet.message.valid &&
+      (vertexPostExecuteState.io.after.asBits =/= vertexPostExecuteState.io.before.asBits)
 
     if (elastic) {
       // Apply captured instruction to archived state

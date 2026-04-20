@@ -28,21 +28,46 @@ if os.environ.get("USE_STREAMING") and "ARCHIVE_DEPTH" not in os.environ:
     os.environ["ARCHIVE_DEPTH"] = str(STREAMING_DEFAULT_ARCHIVE_DEPTH)
 
 
+def plot_data_until_d9(this_dir: str):
+    name = os.path.basename(this_dir)
+    plt.cla()
+    for d in d_vec:
+        if d > 9:
+            continue
+        with open(os.path.join(this_dir, f"d_{d}.txt"), "r", encoding="utf8") as f:
+            p_data = []
+            average_latency_data = []
+            for line in f.readlines():
+                line = line.strip("\r\n ")
+                if line == "" or line.startswith("#"):
+                    continue
+                spt = line.split(" ")
+                assert len(spt) == 3
+                p_data.append(float(spt[0]))
+                average_latency_data.append(float(spt[1]))
+        plt.loglog(p_data, average_latency_data, "o-", label=f"$d = {d}$")
+    plt.ylim(1e-7, 3e-4)
+    plt.ylabel("decoding latency")
+    plt.xlabel("physical error rate")
+    plt.legend()
+    plt.savefig(os.path.join(this_dir, f"{name}.pdf"))
+
+
 if __name__ == "__main__":
     data = []
-    for d in d_vec:
-        latency_vec = []
-        for p in p_vec:
-            benchmarker = DecodingSpeedBenchmarker(
-                this_dir=this_dir,
-                configuration=CircuitLevelFinalConfig(d=d),
-                p=p,
-                samples=SAMPLES,
-                use_layer_fusion=True,
-                enable_detailed_print=False,
-            )
-            result = benchmarker.run()
-            latency_vec.append(result.latency)
-        data.append(latency_vec)
-        save_data(data, this_dir)
-    plot_data(this_dir)
+    # for d in d_vec:
+    #     latency_vec = []
+        # for p in p_vec:
+        #     benchmarker = DecodingSpeedBenchmarker(
+        #         this_dir=this_dir,
+        #         configuration=CircuitLevelFinalConfig(d=d),
+        #         p=p,
+        #         samples=SAMPLES,
+        #         use_layer_fusion=True,
+        #         enable_detailed_print=False,
+        #     )
+        #     result = benchmarker.run()
+        #     latency_vec.append(result.latency)
+        # data.append(latency_vec)
+        # save_data(data, this_dir)
+    plot_data_until_d9(this_dir)
