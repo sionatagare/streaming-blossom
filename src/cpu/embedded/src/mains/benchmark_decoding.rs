@@ -194,7 +194,7 @@ pub fn main() {
             }
             // Load the top layer to clear isVirtual for top-layer vertices
             dual_module.fuse_layer(top_layer_id as CompactLayerNum);
-            if defects_reader.count >= 13000 {
+            if defects_reader.count >= 12000 {
                 println!("[cpu] pre-primal-fuse sample={}", defects_reader.count);
             }
             // Break virtual matchings on the primal side for this layer
@@ -202,7 +202,7 @@ pub fn main() {
                 dual_module,
                 CompactLayerId::new(top_layer_id as CompactLayerNum).unwrap(),
             );
-            if defects_reader.count >= 13000 {
+            if defects_reader.count >= 12000 {
                 println!("[cpu] post-primal-fuse sample={}", defects_reader.count);
             }
 
@@ -217,7 +217,7 @@ pub fn main() {
             while unsafe { extern_c::get_native_time() } < syndrome_finish {
                 spin_loop();
             }
-            if defects_reader.count >= 13000 {
+            if defects_reader.count >= 12000 {
                 println!("[cpu] post-spin sample={}", defects_reader.count);
             }
 
@@ -234,7 +234,7 @@ pub fn main() {
             let mut watchdog_fired = false;
             let mut prev_obstacle_fingerprint: Option<(u32, u32, u32, u32)> = None;
             let mut stale_streak: u32 = 0;
-            const DBG_SAMPLE_THRESHOLD: usize = 13000;
+            const DBG_SAMPLE_THRESHOLD: usize = 12000;
             instr_dbg_set_enabled(defects_reader.count >= DBG_SAMPLE_THRESHOLD);
             micro_blossom_nostd::dual_driver_tracked::fo_dbg_set_enabled(
                 defects_reader.count >= DBG_SAMPLE_THRESHOLD,
