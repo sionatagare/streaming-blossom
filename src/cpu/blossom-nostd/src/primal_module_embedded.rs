@@ -70,10 +70,6 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                 let touch_1 = usu!(touch_1);
                 self.nodes.check_node_index(node_1);
                 self.nodes.check_node_index(touch_1);
-                // Capture raw node IDs before get_outer_blossom rewrites them.
-                // Needed to issue set_blossom(raw → outer) when HW still holds pre-blossom IDs.
-                let node_1_raw = node_1;
-                let node_2_raw = node_2;
                 cfg_if::cfg_if! {
                     if #[cfg(feature="obstacle_potentially_outdated")] {
                         if self.nodes.is_blossom(node_1) && !self.nodes.has_node(node_1) {
@@ -103,16 +99,6 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                         "outdated event found but feature not enabled"
                     );
                     cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
-                        // If either raw node differs from its outer blossom, HW is still
-                        // using a pre-blossom node ID for some archived vertex. Rewrite.
-                        if node_1_raw != node_1 {
-                            dual_module.set_blossom(node_1_raw, node_1);
-                        }
-                        if let Some(raw_n2) = node_2_raw.option() {
-                            if raw_n2 != node_2 {
-                                dual_module.set_blossom(raw_n2, node_2);
-                            }
-                        }
                         if node_1 == node_2 {
                             // Re-issue set_speed to force an archive scan so HW stops
                             // reporting the stale peer conflict (see below).
@@ -146,15 +132,6 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                     self.resolve_conflict(dual_module, node_1, node_2, touch_1, usu!(touch_2), vertex_1, vertex_2)
                 } else {
                     cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
-                        // If the raw node reported by HW (pre get_outer_blossom rewrite)
-                        // differs from the outer blossom, HW is still using a pre-blossom
-                        // node ID for some archived vertex. Issue set_blossom on the raw
-                        // ID so the scan rewrites those archived entries to the outer
-                        // blossom. Without this, the primal thinks it's resolved (node
-                        // is blossomed) but HW keeps reporting the pre-blossom node.
-                        if node_1_raw != node_1 {
-                            dual_module.set_blossom(node_1_raw, node_1);
-                        }
                         if self.nodes.get_grow_state(node_1) != CompactGrowState::Grow {
                             // Without this, the boundary conflict stays latched in
                             // Edge.accConflict across subsequent FindObstacle reads
