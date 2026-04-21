@@ -194,11 +194,13 @@ pub fn main() {
             }
             // Load the top layer to clear isVirtual for top-layer vertices
             dual_module.fuse_layer(top_layer_id as CompactLayerNum);
+            println!("[cpu] pre-primal-fuse sample={}", defects_reader.count);
             // Break virtual matchings on the primal side for this layer
             primal_module.fuse_layer(
                 dual_module,
                 CompactLayerId::new(top_layer_id as CompactLayerNum).unwrap(),
             );
+            println!("[cpu] post-primal-fuse sample={}", defects_reader.count);
 
             // Native latency from when the last fusion-layer syndrome is considered ready
             // (`syndrome_finish`, same construction as batch) until **after** `archive_elastic_slice`
@@ -211,6 +213,7 @@ pub fn main() {
             while unsafe { extern_c::get_native_time() } < syndrome_finish {
                 spin_loop();
             }
+            println!("[cpu] post-spin sample={}", defects_reader.count);
 
             let fast_start = unsafe { extern_c::get_fast_cpu_time() };
 
@@ -221,6 +224,7 @@ pub fn main() {
             //   2. Iteration watchdog: absolute cap as a safety net.
             const SOLVE_WATCHDOG: usize = 10_000;
             let (mut obstacle, _) = dual_module.find_obstacle();
+            println!("[cpu] post-find_obstacle sample={}", defects_reader.count);
             let mut solve_iters: usize = 0;
             let mut watchdog_fired = false;
             let mut prev_obstacle_fingerprint: Option<(u32, u32, u32, u32)> = None;

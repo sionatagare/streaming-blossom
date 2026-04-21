@@ -2155,4 +2155,217 @@ mod tests {
 
         println!("\n  === replay complete (inspect waveform for scanActive behavior) ===");
     }
+
+    /// Reproduce the stale-conflict streak observed in the d=5 benchmark run
+    /// ("[warn] stale-conflict streak at sample N conflict=..."). Streams random
+    /// defects, mimicking the benchmark's 3-strike watchdog. On detection,
+    /// dumps the slotLastScanCycle + archive-state diagnostics to determine
+    /// which category of bug produced the stale slot.
+    ///
+    /// Runs only with WITH_WAVEFORM=1 or similar — needs the per-slot
+    /// instrumentation exposed by simMakePublicSnapshot.
+    #[test]
+    #[ignore = "streams thousands of rounds attempting to reproduce stale-slot bug; slow"]
+    fn dual_module_looper_stale_slot_repro() {
+        use micro_blossom_nostd::util::*;
+        use rand_xoshiro::rand_core::{RngCore, SeedableRng};
+        use rand_xoshiro::Xoshiro256StarStar;
+
+        // Use d=5 phenomenological graph. d=3 doesn't give wide enough vertexBits
+        // for the instruction encoding to hold a blossom_begin high enough to avoid
+        // defect/blossom ID collisions. d=5 gives vertex_num=108 → vertexBits=8
+        // (range 255), so blossom_begin=128 fits and leaves 128 defect IDs per
+        // reset cycle.
+        let archive_depth = 8;
+        let total_rounds = 500;
+        // Error rate: with 12 top-layer vertices and archive_depth=8, expected
+        // ~5 defects per reset cycle at p=0.05, well under the 128 defect-ID budget.
+        let effective_p = 0.05;
+        let blossom_begin: usize = 128;
+
+        let graph_path = format!(
+            "{}/../../../resources/graphs/example_phenomenological_rotated_d5.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let json_str = std::fs::read_to_string(&graph_path)
+            .unwrap_or_else(|e| panic!("read graph {graph_path}: {e}"));
+        let graph: MicroBlossomSingle = serde_json::from_str(&json_str).expect("parse graph");
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+        let top_layer_id = num_layers - 1;
+        let top_vertices: Vec<usize> = graph.layer_fusion.as_ref().unwrap().layers[top_layer_id]
+            .iter().copied().collect();
+
+        let (mut dual, mut primal, _graph, top_layer) =
+            make_streaming_env_from_graph(graph.clone(), archive_depth);
+        // Push blossom_begin above expected defect count per reset cycle, but
+        // within the instruction's vertexBits range (255 for d=5 phenom).
+        primal.nodes.blossom_begin = blossom_begin;
+        for layer_id in 0..num_layers {
+            dual.fuse_layer(layer_id as CompactLayerNum);
+            primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+        }
+
+        let mut rng = Xoshiro256StarStar::seed_from_u64(0xC0FFEE);
+        let mut node_offset: usize = 0;
+        let mut rounds_since_reset: usize = 0;
+        let mut stale_events: Vec<(usize, u32, u32, u32, u32)> = Vec::new();
+
+        for sample in 0..total_rounds {
+            let defects: Vec<usize> = top_vertices.iter()
+                .filter(|_| (rng.next_u32() as f64 / u32::MAX as f64) < effective_p)
+                .copied()
+                .collect();
+
+            // Add defects, fuse top layer
+            for (i, &v) in defects.iter().enumerate() {
+                dual.add_defect(ni!(v), ni!(node_offset + i));
+            }
+            dual.fuse_layer(top_layer);
+            primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
+
+            // Solve loop with stale-conflict detection matching firmware watchdog
+            let (mut obstacle, _) = dual.find_obstacle();
+            let mut prev_fp: Option<(u32, u32, u32, u32)> = None;
+            let mut streak: u32 = 0;
+            let mut stale_detected = false;
+            let mut solve_iters = 0usize;
+            while !obstacle.is_none() {
+                primal.resolve(&mut *dual, obstacle);
+                let (next_obs, _) = dual.find_obstacle();
+                obstacle = next_obs;
+
+                if let CompactObstacle::Conflict { node_1, node_2, vertex_1, vertex_2, .. } = obstacle {
+                    let fp = (
+                        node_1.option().map(|n| n.get() as u32).unwrap_or(u32::MAX),
+                        node_2.option().map(|n| n.get() as u32).unwrap_or(u32::MAX),
+                        vertex_1.get() as u32,
+                        vertex_2.get() as u32,
+                    );
+                    if prev_fp == Some(fp) {
+                        streak += 1;
+                        if streak >= 3 {
+                            stale_detected = true;
+                            stale_events.push((sample, fp.0, fp.1, fp.2, fp.3));
+                            println!("[STALE] sample={sample} conflict=(n1={},n2={},v1={},v2={})",
+                                fp.0, fp.1, fp.2, fp.3);
+                            diagnose_stale_slot(&*dual, &*primal, sample, fp);
+                            break;
+                        }
+                    } else {
+                        streak = 0;
+                        prev_fp = Some(fp);
+                    }
+                } else {
+                    streak = 0;
+                    prev_fp = None;
+                }
+
+                solve_iters += 1;
+                if solve_iters >= 10_000 {
+                    println!("[WATCHDOG] sample={sample} solve loop > 10k iters; breaking");
+                    break;
+                }
+            }
+
+            if stale_detected {
+                // Reset after diagnosis and continue, like the firmware does
+                primal.reset();
+                dual.reset();
+                node_offset = 0;
+                rounds_since_reset = 0;
+                for layer_id in 0..num_layers {
+                    dual.fuse_layer(layer_id as CompactLayerNum);
+                    primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+                }
+                continue;
+            }
+
+            dual.archive_elastic_slice();
+            node_offset += defects.len();
+            rounds_since_reset += 1;
+
+            if rounds_since_reset >= archive_depth || node_offset > MAX_NODE_NUM - 256 {
+                primal.reset();
+                dual.reset();
+                node_offset = 0;
+                rounds_since_reset = 0;
+                for layer_id in 0..num_layers {
+                    dual.fuse_layer(layer_id as CompactLayerNum);
+                    primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+                }
+            }
+
+            if sample % 500 == 0 {
+                println!("[progress] sample {sample}, stale events so far: {}", stale_events.len());
+            }
+        }
+
+        println!("\n=== {} rounds complete, {} stale events ===",
+            total_rounds, stale_events.len());
+        if !stale_events.is_empty() {
+            println!("First stale event: sample={} conflict=(n1={},n2={},v1={},v2={})",
+                stale_events[0].0, stale_events[0].1, stale_events[0].2,
+                stale_events[0].3, stale_events[0].4);
+        }
+    }
+
+    /// Diagnostic helper: on a stale-conflict detection, snapshot the hardware state
+    /// and dump the per-slot last-scan-cycle for every elastic vertex's archive that
+    /// contains the reported raw node ID. This pinpoints which slot is stuck and when
+    /// (if ever) the scan last iterated it.
+    fn diagnose_stale_slot(
+        dual: &DualModuleLooper,
+        primal: &crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
+        sample: usize,
+        fp: (u32, u32, u32, u32),
+    ) {
+        let raw = fp.0; // raw node reported by HW
+        println!("[diagnose] sample={sample} raw_node={raw} (looking for stale archive slots)");
+
+        let snapshot = dual.driver.driver.snapshot(true);
+        let global_cycle = snapshot.get("global_cycle").and_then(|v| v.as_i64()).unwrap_or(-1);
+        println!("[diagnose]   hardware global_cycle = {global_cycle}");
+
+        // Primal's view of the raw node
+        if let Some(ni) = CompactNodeIndex::new(raw as CompactNodeNum).option() {
+            if primal.nodes.has_node(ni) {
+                let node = primal.nodes.get_node(ni);
+                println!("[diagnose]   primal: node {raw} grow_state={:?} parent={:?} sibling={:?}",
+                    node.grow_state,
+                    node.parent.option().map(|x| x.get()),
+                    node.sibling.option().map(|x| x.get()));
+            }
+        }
+
+        // Walk every vertex's archive looking for slots with node == raw
+        let vertices = snapshot.get("vertices").and_then(|v| v.as_array());
+        if let Some(verts) = vertices {
+            for (vi, v) in verts.iter().enumerate() {
+                let archived = v.get("a").and_then(|a| a.as_array());
+                let alsc = v.get("alsc").and_then(|a| a.as_array());
+                if let (Some(slots), Some(cycles)) = (archived, alsc) {
+                    for (slot_idx, slot) in slots.iter().enumerate() {
+                        let node = slot.get("p").and_then(|n| n.as_i64()).unwrap_or(-1);
+                        if node as u32 == raw {
+                            let speed = slot.get("sp").and_then(|s| s.as_i64()).unwrap_or(-1);
+                            let grown = slot.get("g").and_then(|g| g.as_i64()).unwrap_or(-1);
+                            let is_defect = slot.get("s").and_then(|d| d.as_bool()).unwrap_or(false);
+                            let last_scan = cycles.get(slot_idx)
+                                .and_then(|c| c.as_i64()).unwrap_or(-1);
+                            let cycles_since_scan = global_cycle - last_scan;
+                            println!("[diagnose]   STUCK v{vi}.slot[{slot_idx}]: node={node} speed={speed} grown={grown} defect={is_defect}");
+                            println!("[diagnose]     last_scan_cycle={last_scan} (global_cycle={global_cycle}, delta={cycles_since_scan})");
+                            if last_scan == 0 {
+                                println!("[diagnose]     >> scan NEVER iterated this slot!");
+                            } else if cycles_since_scan > 10_000 {
+                                println!("[diagnose]     >> slot was last scanned a long time ago; recent SetBlossom scans skipped it");
+                            } else {
+                                println!("[diagnose]     >> slot was scanned recently but didn't get rewritten");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
