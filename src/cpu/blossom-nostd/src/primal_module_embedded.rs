@@ -191,25 +191,25 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
             }
             CompactObstacle::BlossomNeedExpand { mut blossom } => {
                 debug_assert!(self.nodes.is_blossom(blossom));
+                let dbg = unsafe { crate::dual_driver_tracked::FO_DBG_ENABLE };
+                if dbg { println!("[bne] resolve blossom={}", blossom.get()); }
                 cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                     let original_blossom = blossom;
                     if !self.nodes.has_node(blossom) {
-                        // Outdated: blossom was already expanded or absorbed. The blossom_tracker
-                        // still holds a hit_zero event for `original_blossom`; clear it by setting
-                        // tracker speed to Stay, otherwise find_obstacle re-fires this event
-                        // forever and primal loops returning outdated.
+                        if dbg { println!("[bne] !has_node → purge tracker & return outdated"); }
                         dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
                         return true;
                     }
                     // also convert the event to the outer blossom
                     blossom = self.nodes.get_outer_blossom(blossom);
+                    if dbg { println!("[bne] outer_blossom={} grow_state={:?}", blossom.get(), self.nodes.get_grow_state(blossom)); }
                     if self.nodes.get_grow_state(blossom) != CompactGrowState::Shrink {
-                        // Outdated: the outer blossom isn't Shrinking. Same tracker-purge
-                        // fix as above — clear the stale event on the inner blossom.
+                        if dbg { println!("[bne] outer not Shrink → purge tracker & return outdated"); }
                         dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
                         return true;
                     }
                 } }
+                if dbg { println!("[bne] actually expand blossom={}", blossom.get()); }
                 self.resolve_blossom_need_expand(dual_module, blossom)
             }
             _ => unimplemented_or_loop!(),
