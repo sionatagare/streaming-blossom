@@ -393,7 +393,17 @@ case class Vertex(
       // archivedChanged: True this cycle iff this scan-writeback actually alters BRAM state.
       // Aligned with scanWritebackEn so DistributedDual can gate on writebackTick.
       io.archivedChanged := io.scanWritebackEn && (wbData.asBits =/= archivedRegs(wbAddr).asBits)
-      when(io.scanWritebackEn) {
+      // On RESET: clear all archivedRegs slots so stale historical state doesn't survive
+      // across host-issued resets. Without this, a stuck archived conflict from before RESET
+      // can persist through the soft-reset recovery path, causing the host's stale-conflict
+      // watchdog to re-fire indefinitely. BRAM is intentionally not cleared (can't in one
+      // cycle); archiveValidCount resetting to 0 gates scans so stale BRAM stays invisible.
+      val isResetAtUpdate = compact.valid && compact.isReset
+      when(isResetAtUpdate) {
+        for (i <- 0 until archivedRegsDepth) {
+          archivedRegs(i) := VertexState.resetValue(config, vertexIndex)
+        }
+      } elsewhen(io.scanWritebackEn) {
         archivedRegs(wbAddr) := wbData
         layers.write(address = wbAddr, data = wbData, enable = True)
       } elsewhen(commitArchive && io.archiveCommitEn) {
@@ -434,7 +444,14 @@ case class Vertex(
       // archivedChanged: True this cycle iff this scan-writeback actually alters BRAM state.
       // Aligned with scanWritebackEn so DistributedDual can gate on writebackTick.
       io.archivedChanged := io.scanWritebackEn && (wbData.asBits =/= archivedRegs(wbAddr).asBits)
-      when(io.scanWritebackEn) {
+      // On RESET: clear all archivedRegs slots so stale historical state doesn't survive
+      // across host-issued resets. Same rationale as the contextBits>0 branch above.
+      val isResetAtUpdate = compact.valid && compact.isReset
+      when(isResetAtUpdate) {
+        for (i <- 0 until archivedRegsDepth) {
+          archivedRegs(i) := VertexState.resetValue(config, vertexIndex)
+        }
+      } elsewhen(io.scanWritebackEn) {
         archivedRegs(wbAddr) := wbData
         layers.write(address = wbAddr, data = wbData, enable = True)
       } elsewhen(commitArchive && io.archiveCommitEn) {
