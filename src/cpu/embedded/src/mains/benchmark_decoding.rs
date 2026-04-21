@@ -194,13 +194,11 @@ pub fn main() {
             }
             // Load the top layer to clear isVirtual for top-layer vertices
             dual_module.fuse_layer(top_layer_id as CompactLayerNum);
-            println!("[cpu] pre-primal-fuse sample={}", defects_reader.count);
             // Break virtual matchings on the primal side for this layer
             primal_module.fuse_layer(
                 dual_module,
                 CompactLayerId::new(top_layer_id as CompactLayerNum).unwrap(),
             );
-            println!("[cpu] post-primal-fuse sample={}", defects_reader.count);
 
             // Native latency from when the last fusion-layer syndrome is considered ready
             // (`syndrome_finish`, same construction as batch) until **after** `archive_elastic_slice`
@@ -213,7 +211,6 @@ pub fn main() {
             while unsafe { extern_c::get_native_time() } < syndrome_finish {
                 spin_loop();
             }
-            println!("[cpu] post-spin sample={}", defects_reader.count);
 
             let fast_start = unsafe { extern_c::get_fast_cpu_time() };
 
@@ -269,16 +266,19 @@ pub fn main() {
                 }
             }
 
+            println!("[cpu] post-solve sample={} iters={solve_iters} watchdog={watchdog_fired}", defects_reader.count);
             if watchdog_fired {
                 primal_module.reset();
                 dual_module.reset();
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
+                println!("[cpu] post-watchdog-reset sample={}", defects_reader.count);
                 continue;
             }
 
             // Archive: shifts layer state down, resets top layer for next measurement
             dual_module.archive_elastic_slice();
+            println!("[cpu] post-archive sample={}", defects_reader.count);
 
             let native_after_archive = unsafe { extern_c::get_native_time() };
             let hardware_diff =
@@ -301,6 +301,7 @@ pub fn main() {
             streaming_round_count += 1;
             // Reset when archive BRAM is full or node IDs are about to overflow.
             if streaming_round_count >= ARCHIVE_DEPTH || streaming_node_offset > MAX_STREAMING_NODE_OFFSET {
+                println!("[cpu] pre-capacity-reset sample={}", defects_reader.count);
                 primal_module.reset();
                 dual_module.reset();
                 // Spin-wait for RESET's writeback to land (see watchdog path).
@@ -312,6 +313,7 @@ pub fn main() {
                 }
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
+                println!("[cpu] post-capacity-reset sample={}", defects_reader.count);
             }
             // With DISABLE_DETAIL_PRINT there is otherwise no per-round UART; a hung `find_obstacle`
             // on one sample looks like "d=3 but 15min silence" on the host. Sparse lines keep the
