@@ -225,9 +225,24 @@ pub fn main() {
             let mut watchdog_fired = false;
             let mut prev_obstacle_fingerprint: Option<(u32, u32, u32, u32)> = None;
             let mut stale_streak: u32 = 0;
+            const DBG_SAMPLE_THRESHOLD: usize = 69000;
+            instr_dbg_set_enabled(defects_reader.count >= DBG_SAMPLE_THRESHOLD);
+            micro_blossom_nostd::dual_driver_tracked::fo_dbg_set_enabled(
+                defects_reader.count >= DBG_SAMPLE_THRESHOLD,
+            );
             while !obstacle.is_none() {
+                let dbg = defects_reader.count >= DBG_SAMPLE_THRESHOLD;
+                if dbg {
+                    println!("[cpu] iter sample={} iter={} obs={:?}", defects_reader.count, solve_iters, obstacle);
+                }
                 primal_module.resolve(dual_module, obstacle);
+                if dbg {
+                    println!("[cpu] post-resolve sample={} iter={}", defects_reader.count, solve_iters);
+                }
                 (obstacle, _) = dual_module.find_obstacle();
+                if dbg {
+                    println!("[cpu] post-next-find sample={} iter={}", defects_reader.count, solve_iters);
+                }
                 // Detect a Conflict that repeats verbatim — primal can't make progress on it.
                 if let CompactObstacle::Conflict { node_1, node_2, vertex_1, vertex_2, .. } = obstacle {
                     let fp = (
