@@ -221,14 +221,25 @@ pub fn main() {
             //   2. Iteration watchdog: absolute cap as a safety net.
             const SOLVE_WATCHDOG: usize = 10_000;
             let (mut obstacle, _) = dual_module.find_obstacle();
-            println!("[cpu] post-find_obstacle sample={}", defects_reader.count);
             let mut solve_iters: usize = 0;
             let mut watchdog_fired = false;
             let mut prev_obstacle_fingerprint: Option<(u32, u32, u32, u32)> = None;
             let mut stale_streak: u32 = 0;
             while !obstacle.is_none() {
+                if solve_iters == 0 || (solve_iters >= 100 && solve_iters % 500 == 0) {
+                    println!("[cpu] solve-iter sample={} iter={} obs={:?}", defects_reader.count, solve_iters, obstacle);
+                }
+                if solve_iters == 0 {
+                    println!("[cpu] pre-resolve sample={}", defects_reader.count);
+                }
                 primal_module.resolve(dual_module, obstacle);
+                if solve_iters == 0 {
+                    println!("[cpu] post-resolve sample={}", defects_reader.count);
+                }
                 (obstacle, _) = dual_module.find_obstacle();
+                if solve_iters == 0 {
+                    println!("[cpu] post-next-find sample={}", defects_reader.count);
+                }
                 // Detect a Conflict that repeats verbatim — primal can't make progress on it.
                 if let CompactObstacle::Conflict { node_1, node_2, vertex_1, vertex_2, .. } = obstacle {
                     let fp = (
@@ -266,19 +277,16 @@ pub fn main() {
                 }
             }
 
-            println!("[cpu] post-solve sample={} iters={solve_iters} watchdog={watchdog_fired}", defects_reader.count);
             if watchdog_fired {
                 primal_module.reset();
                 dual_module.reset();
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
-                println!("[cpu] post-watchdog-reset sample={}", defects_reader.count);
                 continue;
             }
 
             // Archive: shifts layer state down, resets top layer for next measurement
             dual_module.archive_elastic_slice();
-            println!("[cpu] post-archive sample={}", defects_reader.count);
 
             let native_after_archive = unsafe { extern_c::get_native_time() };
             let hardware_diff =
@@ -301,7 +309,6 @@ pub fn main() {
             streaming_round_count += 1;
             // Reset when archive BRAM is full or node IDs are about to overflow.
             if streaming_round_count >= ARCHIVE_DEPTH || streaming_node_offset > MAX_STREAMING_NODE_OFFSET {
-                println!("[cpu] pre-capacity-reset sample={}", defects_reader.count);
                 primal_module.reset();
                 dual_module.reset();
                 // Spin-wait for RESET's writeback to land (see watchdog path).
@@ -313,7 +320,6 @@ pub fn main() {
                 }
                 streaming_node_offset = 0;
                 streaming_round_count = 0;
-                println!("[cpu] post-capacity-reset sample={}", defects_reader.count);
             }
             // With DISABLE_DETAIL_PRINT there is otherwise no per-round UART; a hung `find_obstacle`
             // on one sample looks like "d=3 but 15min silence" on the host. Sparse lines keep the
