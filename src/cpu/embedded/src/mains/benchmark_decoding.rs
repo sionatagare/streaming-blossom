@@ -259,7 +259,7 @@ pub fn main() {
                                     continue;
                                 }
                                 let id_usize = id as usize;
-                                if let Some(ni) = CompactNodeIndex::new(id as CompactNodeNum) {
+                                if let Some(ni) = CompactNodeIndex::new(id as CompactNodeNum).option() {
                                     let has = primal_module.nodes.has_node(ni);
                                     let is_blossom = id_usize >= primal_module.nodes.blossom_begin;
                                     if has {
