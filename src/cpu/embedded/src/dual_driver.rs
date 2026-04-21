@@ -21,8 +21,12 @@ impl DualDriver {
 /// Lets us see exactly which instruction call hangs when the hardware deadlocks.
 pub const INSTR_DBG: bool = option_env!("INSTR_DBG").is_some();
 static mut INSTR_SEQ: u32 = 0;
+static mut INSTR_DBG_ENABLE: bool = false;
+pub fn instr_dbg_set_enabled(enabled: bool) {
+    unsafe { INSTR_DBG_ENABLE = enabled; }
+}
 fn dbg_tag(tag: &str, value: u32) {
-    if INSTR_DBG {
+    if INSTR_DBG && unsafe { INSTR_DBG_ENABLE } {
         let seq = unsafe {
             INSTR_SEQ = INSTR_SEQ.wrapping_add(1);
             INSTR_SEQ
