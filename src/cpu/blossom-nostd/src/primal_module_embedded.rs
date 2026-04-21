@@ -70,6 +70,13 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                 let touch_1 = usu!(touch_1);
                 self.nodes.check_node_index(node_1);
                 self.nodes.check_node_index(touch_1);
+                // Capture the raw HW-reported indices before blossom-outer remap, so
+                // outdated-event branches can re-issue set_blossom(raw, outer) to
+                // rewrite archived vertex.node entries that HW still holds stale.
+                #[cfg(feature = "obstacle_potentially_outdated")]
+                let raw_node_1 = node_1;
+                #[cfg(feature = "obstacle_potentially_outdated")]
+                let raw_node_2 = node_2;
                 cfg_if::cfg_if! {
                     if #[cfg(feature="obstacle_potentially_outdated")] {
                         if self.nodes.is_blossom(node_1) && !self.nodes.has_node(node_1) {
@@ -100,6 +107,19 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                     );
                     cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                         if node_1 == node_2 {
+                            // Both endpoints resolved to the same outer blossom.
+                            // HW's archive may still hold pre-SetBlossom raw indices
+                            // for either endpoint; rewrite them so subsequent
+                            // find_obstacle returns the outer blossom (or a fresh
+                            // conflict) instead of re-firing this stale one.
+                            if raw_node_1 != node_1 {
+                                dual_module.set_blossom(raw_node_1, node_1);
+                            }
+                            if let Some(raw2) = raw_node_2.option() {
+                                if raw2 != node_1 {
+                                    dual_module.set_blossom(raw2, node_1);
+                                }
+                            }
                             // Re-issue set_speed to force an archive scan so HW stops
                             // reporting the stale peer conflict (see below).
                             dual_module.set_speed(
@@ -111,11 +131,22 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                         }
                         if !CompactGrowState::is_conflicting(
                                 self.nodes.get_grow_state(node_1), self.nodes.get_grow_state(node_2)) {
-                            // Refresh BOTH nodes' archived state. A set_speed on node_1
-                            // alone leaves node_2's archived speed stale (typically Grow
-                            // from when it was last a growing defect), so the next scan
-                            // still sees joint-speed-positive and re-fires the same
-                            // conflict. Issuing both clears the stale bit on either side.
+                            // Rewrite archived node IDs if HW's raw endpoints differ
+                            // from primal's outer-blossom view. Then refresh BOTH
+                            // nodes' archived speed — a set_speed on node_1 alone
+                            // leaves node_2's archived speed stale (typically Grow
+                            // from when it was last a growing defect), so the next
+                            // scan still sees joint-speed-positive and re-fires the
+                            // same conflict. Issuing both clears the stale bit on
+                            // either side.
+                            if raw_node_1 != node_1 {
+                                dual_module.set_blossom(raw_node_1, node_1);
+                            }
+                            if let Some(raw2) = raw_node_2.option() {
+                                if raw2 != node_2 {
+                                    dual_module.set_blossom(raw2, node_2);
+                                }
+                            }
                             dual_module.set_speed(
                                 self.nodes.is_blossom(node_1),
                                 node_1,
@@ -133,12 +164,20 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                 } else {
                     cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                         if self.nodes.get_grow_state(node_1) != CompactGrowState::Grow {
-                            // Without this, the boundary conflict stays latched in
-                            // Edge.accConflict across subsequent FindObstacle reads
-                            // (FindObstacle doesn't trigger needsArchivedScan()), so
-                            // the firmware sees the same stale event 3× and fires
-                            // its watchdog. Re-issuing set_speed with the current
-                            // state triggers a scan that refreshes the archive.
+                            // HW's archive may still hold the pre-SetBlossom raw
+                            // node_1 index. Rewrite it first so subsequent
+                            // find_obstacle returns the outer blossom instead of
+                            // re-firing the same stale boundary conflict.
+                            if raw_node_1 != node_1 {
+                                dual_module.set_blossom(raw_node_1, node_1);
+                            }
+                            // Without the set_speed below, the boundary conflict
+                            // stays latched in Edge.accConflict across subsequent
+                            // FindObstacle reads (FindObstacle doesn't trigger
+                            // needsArchivedScan()), so the firmware sees the same
+                            // stale event 3× and fires its watchdog. Re-issuing
+                            // set_speed with the current state triggers a scan
+                            // that refreshes the archive.
                             dual_module.set_speed(
                                 self.nodes.is_blossom(node_1),
                                 node_1,

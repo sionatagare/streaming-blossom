@@ -122,6 +122,10 @@ pub trait DualInterface {
     /// set the speed of a node
     fn set_speed(&mut self, is_blossom: bool, node_index: CompactNodeIndex, grow_state: CompactGrowState);
 
+    /// retarget a node into a blossom — triggers an archive scan that rewrites
+    /// state.node for every vertex where before.node===node || before.root===node
+    fn set_blossom(&mut self, node: CompactNodeIndex, blossom: CompactNodeIndex);
+
     /// find an obstacle and return the amount of growth from last return
     fn find_obstacle(&mut self) -> (CompactObstacle, CompactWeight);
 
@@ -151,6 +155,10 @@ impl<T: DualInterface + ?Sized> DualInterface for std::boxed::Box<T> {
 
     fn set_speed(&mut self, is_blossom: bool, node_index: CompactNodeIndex, grow_state: CompactGrowState) {
         (**self).set_speed(is_blossom, node_index, grow_state)
+    }
+
+    fn set_blossom(&mut self, node: CompactNodeIndex, blossom: CompactNodeIndex) {
+        (**self).set_blossom(node, blossom)
     }
 
     fn find_obstacle(&mut self) -> (CompactObstacle, CompactWeight) {

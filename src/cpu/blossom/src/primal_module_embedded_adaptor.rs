@@ -95,6 +95,13 @@ impl<'a, D: DualModuleImpl> DualInterface for MockDualInterface<'a, D> {
         self.interface_ptr
             .expand_blossom(self.index_to_ptr.get(&blossom_index).unwrap().clone(), self.dual_module);
     }
+    fn set_blossom(&mut self, _node: CompactNodeIndex, _blossom: CompactNodeIndex) {
+        // Rust-side dual module maintains blossom membership via create_blossom's
+        // ptr graph, so archive-rewrite pokes from primal are a no-op here.
+        #[cfg(all(test, debug_assertions))]
+        println!("[dual] set_blossom({_node}, {_blossom}) [no-op]");
+    }
+
     fn set_speed(&mut self, _is_blossom: bool, node_index: CompactNodeIndex, grow_state: CompactGrowState) {
         #[cfg(all(test, debug_assertions))]
         println!("[dual] set_grow_state({node_index}, {grow_state:?})");
