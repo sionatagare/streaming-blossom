@@ -141,6 +141,10 @@ impl<const N: usize> BlossomTracker<N> {
         let ni = node_index.get();
         let fi = self.first_index.get();
         if ni < fi || (ni - fi) as usize >= self.checkpoints.len() {
+            if unsafe { crate::dual_driver_tracked::FO_DBG_ENABLE } {
+                println!("[tracker_guard] drop set_speed(node={ni}, first_index={fi}, len={}, speed={:?})",
+                         self.checkpoints.len(), grow_state);
+            }
             return;
         }
         let local_index = self.local_index_of(node_index);
