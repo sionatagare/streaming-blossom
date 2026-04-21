@@ -937,9 +937,14 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
             if dbg { println!("[pfuse] before get_matched"); }
             if let CompactMatchTarget::VirtualVertex(virtual_vertex) = primal_node.get_matched() {
                 if dbg { println!("[pfuse] matched_to_virtual vertex={}", virtual_vertex.get()); }
-                let layer_opt = layer_fusion.get_layer_id(virtual_vertex);
-                if dbg { println!("[pfuse] layer_id_opt={:?}", layer_opt.option().map(|x| x.get())); }
-                if layer_opt.unwrap() == layer_id {
+                // A boundary virtual vertex may have no layer_id (it stays virtual for the
+                // entire streaming run). Such a matching never needs to be "broken" on layer
+                // fusion, so drop the pending entry instead of unwrapping None.
+                let Some(match_layer) = layer_fusion.get_layer_id(virtual_vertex).option() else {
+                    if dbg { println!("[pfuse] virtual vertex has no layer_id → remove"); }
+                    return true;
+                };
+                if match_layer == layer_id {
                     if dbg { println!("[pfuse] layer matches → break matching"); }
                     primal_node.remove_from_matching();
                     nodes.set_speed(node, CompactGrowState::Grow, dual_module);
