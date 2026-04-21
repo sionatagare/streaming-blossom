@@ -243,6 +243,43 @@ pub fn main() {
                                 "[warn] stale-conflict streak at sample {} conflict=(n1={},n2={},v1={},v2={}); reset+continue",
                                 defects_reader.count, fp.0, fp.1, fp.2, fp.3
                             );
+                            // Diagnostic: primal state at the hang
+                            println!(
+                                "[dbg] primal state: count_defects={}, count_blossoms={}, blossom_begin={}, streaming_node_offset={}, streaming_round_count={}",
+                                primal_module.nodes.count_defects,
+                                primal_module.nodes.count_blossoms,
+                                primal_module.nodes.blossom_begin,
+                                streaming_node_offset,
+                                streaming_round_count,
+                            );
+                            // Inspect the conflicting nodes' primal state
+                            for (label, id) in [("n1", fp.0), ("n2", fp.1)] {
+                                if id == u32::MAX {
+                                    println!("[dbg]   {label}: IndexNone (boundary)");
+                                    continue;
+                                }
+                                let id_usize = id as usize;
+                                if let Some(ni) = CompactNodeIndex::new(id as CompactNodeNum) {
+                                    let has = primal_module.nodes.has_node(ni);
+                                    let is_blossom = id_usize >= primal_module.nodes.blossom_begin;
+                                    if has {
+                                        let node = primal_module.nodes.get_node(ni);
+                                        println!(
+                                            "[dbg]   {label}={id} (is_blossom={is_blossom}) has_node=true grow_state={:?} parent={:?} sibling={:?} first_child={:?}",
+                                            node.grow_state,
+                                            node.parent.option().map(|x| x.get()),
+                                            node.sibling.option().map(|x| x.get()),
+                                            node.first_child.option().map(|x| x.get()),
+                                        );
+                                    } else {
+                                        println!(
+                                            "[dbg]   {label}={id} (is_blossom={is_blossom}) has_node=FALSE — primal has no record of this node",
+                                        );
+                                    }
+                                } else {
+                                    println!("[dbg]   {label}={id} invalid CompactNodeIndex");
+                                }
+                            }
                             watchdog_fired = true;
                             break;
                         }
