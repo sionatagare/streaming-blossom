@@ -208,9 +208,10 @@ pub fn main() {
             let syndrome_start = native_start + syndrome_start_delay_cycle;
             let syndrome_finish = syndrome_start + finish_delta;
             unsafe { extern_c::setup_load_stall_emulator(syndrome_start, interval, context_id) };
-            while unsafe { extern_c::get_native_time() } < syndrome_finish {
-                spin_loop();
-            }
+            // No CPU-side spin-wait: the hardware load_stall_emulator gates the find_obstacle
+            // response until syndrome_finish, so we can issue find_obstacle immediately and let
+            // AXI/pipeline overhead overlap with the remaining wait. This matches batch-mode
+            // methodology and shaves the CPU-issue latency out of the measurement.
 
             let fast_start = unsafe { extern_c::get_fast_cpu_time() };
 
