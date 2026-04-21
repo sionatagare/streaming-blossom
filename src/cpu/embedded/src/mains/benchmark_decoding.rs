@@ -227,6 +227,9 @@ pub fn main() {
             let mut stale_streak: u32 = 0;
             const DBG_SAMPLE_THRESHOLD: usize = 25000;
             instr_dbg_set_enabled(defects_reader.count >= DBG_SAMPLE_THRESHOLD);
+            micro_blossom_nostd::dual_driver_tracked::fo_dbg_set_enabled(
+                defects_reader.count >= DBG_SAMPLE_THRESHOLD,
+            );
             while !obstacle.is_none() {
                 let dbg = defects_reader.count >= DBG_SAMPLE_THRESHOLD;
                 if dbg {
