@@ -155,19 +155,22 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                 cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                     let original_blossom = blossom;
                     if !self.nodes.has_node(blossom) {
-                        // Outdated: blossom was already expanded or absorbed. The blossom_tracker
-                        // still holds a hit_zero event for `original_blossom`; clear it by setting
-                        // tracker speed to Stay, otherwise find_obstacle re-fires this event
-                        // forever and primal loops returning outdated.
+                        // Blossom no longer exists in primal but tracker still holds its
+                        // hit_zero event. Tracker-only set_speed via dual_module clears it.
                         dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
                         return true;
                     }
                     // also convert the event to the outer blossom
                     blossom = self.nodes.get_outer_blossom(blossom);
                     if self.nodes.get_grow_state(blossom) != CompactGrowState::Shrink {
-                        // Outdated: the outer blossom isn't Shrinking. Same tracker-purge
-                        // fix as above — clear the stale event on the inner blossom.
-                        dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
+                        // Update primal's grow_state for the ORIGINAL (inner) blossom so
+                        // subsequent stale-conflict refreshes don't re-issue Shrink for it.
+                        // Using nodes.set_speed ensures both primal and tracker stay in sync.
+                        if self.nodes.has_node(original_blossom) {
+                            self.nodes.set_speed(original_blossom, CompactGrowState::Stay, dual_module);
+                        } else {
+                            dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
+                        }
                         return true;
                     }
                 } }
@@ -453,6 +456,15 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
             }
             inner_node = usu!(self.nodes.get_node(inner_node).sibling);
             cycle_index += 1;
+        }
+        // Tree-invariant mitigation: if either inner_to_parent or inner_to_child isn't in the
+        // blossom's sibling chain, the blossom's child set has drifted from the tree links
+        // (usually because a stale-conflict set_blossom rewrote a pointer without updating the
+        // child set). Panicking via .unwrap() below hangs the firmware silently in no-std;
+        // instead treat this as an outdated event: update primal grow_state + tracker and bail.
+        if cycle_index_parent.is_none() || cycle_index_child.is_none() {
+            self.nodes.set_speed(blossom, CompactGrowState::Stay, dual_module);
+            return true;
         }
         debug_assert!(cycle_index % 2 == 1, "should be an odd cycle");
         let cycle_length = cycle_index;
