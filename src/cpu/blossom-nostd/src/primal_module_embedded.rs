@@ -192,13 +192,22 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
             CompactObstacle::BlossomNeedExpand { mut blossom } => {
                 debug_assert!(self.nodes.is_blossom(blossom));
                 cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
+                    let original_blossom = blossom;
                     if !self.nodes.has_node(blossom) {
-                        return true; // outdated event: blossom already expanded
+                        // Outdated: blossom was already expanded or absorbed. The blossom_tracker
+                        // still holds a hit_zero event for `original_blossom`; clear it by setting
+                        // tracker speed to Stay, otherwise find_obstacle re-fires this event
+                        // forever and primal loops returning outdated.
+                        dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
+                        return true;
                     }
                     // also convert the event to the outer blossom
                     blossom = self.nodes.get_outer_blossom(blossom);
                     if self.nodes.get_grow_state(blossom) != CompactGrowState::Shrink {
-                        return true; // outdated event
+                        // Outdated: the outer blossom isn't Shrinking. Same tracker-purge
+                        // fix as above — clear the stale event on the inner blossom.
+                        dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
+                        return true;
                     }
                 } }
                 self.resolve_blossom_need_expand(dual_module, blossom)
