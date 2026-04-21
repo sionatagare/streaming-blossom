@@ -273,13 +273,20 @@ pub fn main() {
                 continue;
             }
 
-            let native_before_archive = unsafe { extern_c::get_native_time() };
+            // Use the hardware-latched finish time (like batch mode at line 383) to
+            // measure decoder-internal latency only. `finish_time` is updated inside
+            // the looper response path whenever a FindObstacle pops with
+            // maxGrowable.length === maxValue — i.e. the moment the decoder signals
+            // "done" internally. This excludes CPU/AXI round-trip overhead for the
+            // final find_obstacle read (which is what `get_native_time` here would
+            // include) and gives a direct apples-to-apples comparison to batch mode.
+            let finish_time = unsafe { extern_c::get_last_finish_time(context_id) };
             let hardware_diff =
-                unsafe { extern_c::diff_native_time(syndrome_finish, native_before_archive) } as f64;
+                unsafe { extern_c::diff_native_time(syndrome_finish, finish_time) } as f64;
             latency_benchmarker.record(hardware_diff);
 
             // Archive: shifts layer state down, resets top layer for next measurement.
-            // Keep this after timing so the measured latency excludes archive overhead.
+            // Issued after timing so the measured latency excludes archive overhead too.
             dual_module.archive_elastic_slice();
 
             let cpu_wall_diff = (unsafe { extern_c::get_fast_cpu_duration_ns(fast_start) } as f64) * 1e-9;
