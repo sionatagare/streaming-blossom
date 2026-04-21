@@ -71,6 +71,14 @@ impl<D: DualStacklessDriver> DualInterface for DualModuleStackless<D> {
         self.driver.set_speed(is_blossom, node_index, grow_state);
     }
 
+    fn set_blossom(&mut self, node: CompactNodeIndex, blossom: CompactNodeIndex) {
+        #[cfg(any(test, feature = "std"))]
+        if option_env!("PRINT_DUAL_CALLS").is_some() {
+            println!("set_blossom({node}, {blossom})");
+        }
+        self.driver.set_blossom(node, blossom);
+    }
+
     fn find_obstacle(&mut self) -> (CompactObstacle, CompactWeight) {
         self.driver.find_obstacle()
     }
