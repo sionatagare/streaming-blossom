@@ -15,11 +15,6 @@ pub trait DualTrackedDriver {
     fn find_conflict(&mut self, maximum_growth: CompactWeight) -> (CompactObstacle, CompactWeight);
 }
 
-pub static mut FO_DBG_ENABLE: bool = false;
-pub fn fo_dbg_set_enabled(enabled: bool) {
-    unsafe { FO_DBG_ENABLE = enabled; }
-}
-
 pub struct DualDriverTracked<D: DualStacklessDriver + DualTrackedDriver, const N: usize> {
     pub driver: D,
     pub blossom_tracker: BlossomTracker<N>,
@@ -56,14 +51,9 @@ impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualStacklessDr
 
     fn find_obstacle(&mut self) -> (CompactObstacle, CompactWeight) {
         let mut grown = 0;
-        let dbg = option_env!("FIND_OBSTACLE_DBG").is_some() && unsafe { FO_DBG_ENABLE };
-        if dbg { println!("[fo_dbg] ENTER find_obstacle"); }
-        let mut iter: u32 = 0;
         loop {
-            if dbg { println!("[fo_dbg] iter={iter} pre-tracker"); }
             let max_growth_used = if let Some((length, blossom)) = self.blossom_tracker.get_maximum_growth() {
                 if length == 0 {
-                    if dbg { println!("[fo_dbg] iter={iter} tracker_len=0 → BlossomNeedExpand({})", blossom.get()); }
                     return (CompactObstacle::BlossomNeedExpand { blossom }, grown);
                 } else {
                     length
@@ -71,19 +61,9 @@ impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualStacklessDr
             } else {
                 CompactWeight::MAX
             };
-            if dbg { println!("[fo_dbg] iter={iter} pre-find_conflict max_growth={max_growth_used}"); }
             let (obstacle, local_grown) = self.driver.find_conflict(max_growth_used);
             self.blossom_tracker.advance_time(local_grown as CompactTimestamp);
             grown += local_grown;
-            if dbg {
-                let tag = match obstacle {
-                    CompactObstacle::None => "None",
-                    CompactObstacle::GrowLength { .. } => "GrowLength",
-                    CompactObstacle::Conflict { .. } => "Conflict",
-                    CompactObstacle::BlossomNeedExpand { .. } => "BlossomNeedExpand",
-                };
-                println!("[fo_dbg] iter={iter} max_growth={max_growth_used} local_grown={local_grown} grown={grown} obstacle={tag}");
-            }
             if !obstacle.is_finite_growth() {
                 return (obstacle, grown);
             }
@@ -95,7 +75,6 @@ impl<D: DualStacklessDriver + DualTrackedDriver, const N: usize> DualStacklessDr
             if local_grown == 0 {
                 return (CompactObstacle::None, grown);
             }
-            iter = iter.wrapping_add(1);
         }
     }
 

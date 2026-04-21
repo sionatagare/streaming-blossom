@@ -191,23 +191,17 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
             }
             CompactObstacle::BlossomNeedExpand { mut blossom } => {
                 debug_assert!(self.nodes.is_blossom(blossom));
-                let dbg = unsafe { crate::dual_driver_tracked::FO_DBG_ENABLE };
-                if dbg { println!("[bne] resolve blossom={}", blossom.get()); }
                 cfg_if::cfg_if! { if #[cfg(feature="obstacle_potentially_outdated")] {
                     let original_blossom = blossom;
                     if !self.nodes.has_node(blossom) {
-                        if dbg { println!("[bne] !has_node → purge tracker & return outdated"); }
-                        // The blossom no longer exists in primal, but the tracker still has its
-                        // hit_zero event. Skip the primal-side update (no node to update) and
-                        // inject tracker-only set_speed via dual_module.
+                        // Blossom no longer exists in primal but tracker still holds its
+                        // hit_zero event. Tracker-only set_speed via dual_module clears it.
                         dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
                         return true;
                     }
                     // also convert the event to the outer blossom
                     blossom = self.nodes.get_outer_blossom(blossom);
-                    if dbg { println!("[bne] outer_blossom={} grow_state={:?}", blossom.get(), self.nodes.get_grow_state(blossom)); }
                     if self.nodes.get_grow_state(blossom) != CompactGrowState::Shrink {
-                        if dbg { println!("[bne] outer not Shrink → purge tracker & return outdated"); }
                         // Update primal's grow_state for the ORIGINAL (inner) blossom so
                         // subsequent stale-conflict refreshes don't re-issue Shrink for it.
                         // Using nodes.set_speed ensures both primal and tracker stay in sync.
@@ -219,7 +213,6 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                         return true;
                     }
                 } }
-                if dbg { println!("[bne] actually expand blossom={}", blossom.get()); }
                 self.resolve_blossom_need_expand(dual_module, blossom)
             }
             _ => unimplemented_or_loop!(),
@@ -472,41 +465,28 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
 
     /// handle an up-to-date blossom need expand event
     pub fn resolve_blossom_need_expand(&mut self, dual_module: &mut impl DualInterface, blossom: CompactNodeIndex) -> bool {
-        let dbg = unsafe { crate::dual_driver_tracked::FO_DBG_ENABLE };
-        if dbg { println!("[rbne] pre-expand_blossom={}", blossom.get()); }
         dual_module.expand_blossom(self, blossom);
-        if dbg { println!("[rbne] post-expand_blossom"); }
         // the blossom is guaranteed to be a - node in the alternating tree, thus only 1 children
         let blossom_primal_node = self.nodes.get_node(blossom);
         let parent_index = usu!(blossom_primal_node.parent);
         let child_index = usu!(blossom_primal_node.first_child);
-        if dbg { println!("[rbne] parent={} child={}", parent_index.get(), child_index.get()); }
         let touch_to_parent = usu!(blossom_primal_node.link.touch);
         let touch_to_child = usu!(self.nodes.get_node(child_index).link.peer_touch);
         let inner_to_parent = self.nodes.get_second_outer_blossom(touch_to_parent);
         let inner_to_child = self.nodes.get_second_outer_blossom(touch_to_child);
-        if dbg { println!("[rbne] inner_to_parent={} inner_to_child={}", inner_to_parent.get(), inner_to_child.get()); }
         // find the index of the inner nodes in the odd cycle
         let mut cycle_index_parent = None;
         let mut cycle_index_child = None;
         let first_blossom_child = self.nodes.get_first_blossom_child(blossom);
-        if dbg { println!("[rbne] first_blossom_child={}", first_blossom_child.get()); }
         if first_blossom_child == inner_to_parent {
             cycle_index_parent = Some(0);
         }
         if first_blossom_child == inner_to_child {
             cycle_index_child = Some(0);
         }
-        if dbg { println!("[rbne] entering sibling walk"); }
         let mut inner_node = usu!(self.nodes.get_node(first_blossom_child).sibling);
         let mut cycle_index = 1;
         while inner_node != first_blossom_child {
-            if dbg && cycle_index <= 20 {
-                println!("[rbne] cycle_index={} inner_node={}", cycle_index, inner_node.get());
-            }
-            if dbg && cycle_index == 1000 {
-                println!("[rbne] WARNING: cycle_index hit 1000, sibling chain likely cyclic");
-            }
             if inner_node == inner_to_parent {
                 cycle_index_parent = Some(cycle_index);
             }
@@ -516,23 +496,12 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
             inner_node = usu!(self.nodes.get_node(inner_node).sibling);
             cycle_index += 1;
         }
-        if dbg { println!("[rbne] sibling walk done, cycle_index={}", cycle_index); }
         // Tree-invariant mitigation: if either inner_to_parent or inner_to_child isn't in the
         // blossom's sibling chain, the blossom's child set has drifted from the tree links
         // (usually because a stale-conflict set_blossom rewrote a pointer without updating the
-        // child set). Panicking via the .unwrap() below hangs the firmware silently in no-std;
-        // instead, treat this as an outdated event: clear the tracker and return.
+        // child set). Panicking via .unwrap() below hangs the firmware silently in no-std;
+        // instead treat this as an outdated event: update primal grow_state + tracker and bail.
         if cycle_index_parent.is_none() || cycle_index_child.is_none() {
-            if dbg {
-                println!(
-                    "[rbne] tree-invariant violation: parent_in_cycle={:?} child_in_cycle={:?} → purge & bail",
-                    cycle_index_parent, cycle_index_child
-                );
-            }
-            // Update primal's own grow_state too — otherwise subsequent stale-conflict
-            // refreshes re-issue set_speed(..., get_grow_state(...)) which reads Shrink
-            // from primal and re-propagates it to the tracker, pushing a new hit_zero
-            // event and looping forever.
             self.nodes.set_speed(blossom, CompactGrowState::Stay, dual_module);
             return true;
         }
@@ -1005,12 +974,7 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
     /// fusing a layer will remove all existing virtual matchings with the layer
     pub fn fuse_layer(&mut self, dual_module: &mut impl DualInterface, layer_id: CompactLayerId) {
         let (layer_fusion, nodes) = (&mut self.layer_fusion, &mut self.nodes);
-        let dbg = unsafe { crate::dual_driver_tracked::FO_DBG_ENABLE };
-        if dbg { println!("[pfuse] ENTER count_pending_breaks={}", layer_fusion.count_pending_breaks); }
-        let mut visited: u32 = 0;
         layer_fusion.iterate_pending_breaks(|layer_fusion, node| {
-            if dbg { println!("[pfuse] visit={visited} node={}", node.get()); }
-            visited = visited.wrapping_add(1);
             if !nodes.has_node(node) {
                 // it may happen that a blossom is expanded but its node index remains in the fusion list
                 // in this case, simply ignore this node
@@ -1042,7 +1006,6 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
                 true // no longer pending
             }
         });
-        if dbg { println!("[pfuse] EXIT visited={visited}"); }
     }
 }
 
