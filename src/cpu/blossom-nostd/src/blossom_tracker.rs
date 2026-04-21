@@ -134,6 +134,15 @@ impl<const N: usize> BlossomTracker<N> {
         if self.checkpoints.is_empty() {
             return;
         }
+        // Guard against blossom indices outside the tracker's current range. Primal may refer to
+        // blossoms whose `create_blossom` predates the last `clear()`; silently writing via a
+        // wrapped index corrupts `checkpoints`, `grow_states`, and the `hit_zero_events` heap,
+        // which then deadlocks the next `get_maximum_growth` call.
+        let ni = node_index.get();
+        let fi = self.first_index.get();
+        if ni < fi || (ni - fi) as usize >= self.checkpoints.len() {
+            return;
+        }
         let local_index = self.local_index_of(node_index);
         // update checkpoint timestamp to the current timestamp and update its dual value accordingly
         if &grow_state == get!(self.grow_states, local_index) {
