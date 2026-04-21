@@ -914,28 +914,41 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
                 println!("[pfuse] visit={visited} node={}", node.get());
             }
             visited = visited.wrapping_add(1);
+            if dbg { println!("[pfuse] before has_node"); }
             if !nodes.has_node(node) {
                 // it may happen that a blossom is expanded but its node index remains in the fusion list
                 // in this case, simply ignore this node
                 debug_assert!(nodes.is_blossom(node), "only blossom may encounter this");
+                if dbg { println!("[pfuse] !has_node → remove"); }
                 return true; // no longer an valid node
             }
+            if dbg { println!("[pfuse] before get_node_mut"); }
             let primal_node = nodes.get_node_mut(node);
+            if dbg { println!("[pfuse] before is_outer_blossom"); }
             if !primal_node.is_outer_blossom() {
+                if dbg { println!("[pfuse] !is_outer_blossom → remove"); }
                 return true; // no longer an active node
             }
+            if dbg { println!("[pfuse] before is_matched"); }
             if !primal_node.is_matched() {
+                if dbg { println!("[pfuse] !is_matched → remove"); }
                 return true; // no longer pending
             }
+            if dbg { println!("[pfuse] before get_matched"); }
             if let CompactMatchTarget::VirtualVertex(virtual_vertex) = primal_node.get_matched() {
-                if layer_fusion.get_layer_id(virtual_vertex).unwrap() == layer_id {
-                    // break the matching
+                if dbg { println!("[pfuse] matched_to_virtual vertex={}", virtual_vertex.get()); }
+                let layer_opt = layer_fusion.get_layer_id(virtual_vertex);
+                if dbg { println!("[pfuse] layer_id_opt={:?}", layer_opt.option().map(|x| x.get())); }
+                if layer_opt.unwrap() == layer_id {
+                    if dbg { println!("[pfuse] layer matches → break matching"); }
                     primal_node.remove_from_matching();
                     nodes.set_speed(node, CompactGrowState::Grow, dual_module);
                     return true;
                 }
+                if dbg { println!("[pfuse] layer differs → keep pending"); }
                 false // keep it pending
             } else {
+                if dbg { println!("[pfuse] matched_to_peer → remove"); }
                 true // no longer pending
             }
         });
