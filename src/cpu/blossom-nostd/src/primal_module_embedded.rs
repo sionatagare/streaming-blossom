@@ -507,6 +507,21 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
             cycle_index += 1;
         }
         if dbg { println!("[rbne] sibling walk done, cycle_index={}", cycle_index); }
+        // Tree-invariant mitigation: if either inner_to_parent or inner_to_child isn't in the
+        // blossom's sibling chain, the blossom's child set has drifted from the tree links
+        // (usually because a stale-conflict set_blossom rewrote a pointer without updating the
+        // child set). Panicking via the .unwrap() below hangs the firmware silently in no-std;
+        // instead, treat this as an outdated event: clear the tracker and return.
+        if cycle_index_parent.is_none() || cycle_index_child.is_none() {
+            if dbg {
+                println!(
+                    "[rbne] tree-invariant violation: parent_in_cycle={:?} child_in_cycle={:?} → purge & bail",
+                    cycle_index_parent, cycle_index_child
+                );
+            }
+            dual_module.set_speed(true, blossom, CompactGrowState::Stay);
+            return true;
+        }
         debug_assert!(cycle_index % 2 == 1, "should be an odd cycle");
         let cycle_length = cycle_index;
         let cycle_index_parent = usu!(cycle_index_parent);
