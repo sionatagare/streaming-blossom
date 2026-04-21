@@ -197,6 +197,9 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                     let original_blossom = blossom;
                     if !self.nodes.has_node(blossom) {
                         if dbg { println!("[bne] !has_node → purge tracker & return outdated"); }
+                        // The blossom no longer exists in primal, but the tracker still has its
+                        // hit_zero event. Skip the primal-side update (no node to update) and
+                        // inject tracker-only set_speed via dual_module.
                         dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
                         return true;
                     }
@@ -205,7 +208,14 @@ impl<const N: usize, const VN: usize> PrimalInterface for PrimalModuleEmbedded<N
                     if dbg { println!("[bne] outer_blossom={} grow_state={:?}", blossom.get(), self.nodes.get_grow_state(blossom)); }
                     if self.nodes.get_grow_state(blossom) != CompactGrowState::Shrink {
                         if dbg { println!("[bne] outer not Shrink → purge tracker & return outdated"); }
-                        dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
+                        // Update primal's grow_state for the ORIGINAL (inner) blossom so
+                        // subsequent stale-conflict refreshes don't re-issue Shrink for it.
+                        // Using nodes.set_speed ensures both primal and tracker stay in sync.
+                        if self.nodes.has_node(original_blossom) {
+                            self.nodes.set_speed(original_blossom, CompactGrowState::Stay, dual_module);
+                        } else {
+                            dual_module.set_speed(true, original_blossom, CompactGrowState::Stay);
+                        }
                         return true;
                     }
                 } }
@@ -519,7 +529,11 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
                     cycle_index_parent, cycle_index_child
                 );
             }
-            dual_module.set_speed(true, blossom, CompactGrowState::Stay);
+            // Update primal's own grow_state too — otherwise subsequent stale-conflict
+            // refreshes re-issue set_speed(..., get_grow_state(...)) which reads Shrink
+            // from primal and re-propagates it to the tracker, pushing a new hit_zero
+            // event and looping forever.
+            self.nodes.set_speed(blossom, CompactGrowState::Stay, dual_module);
             return true;
         }
         debug_assert!(cycle_index % 2 == 1, "should be an odd cycle");
