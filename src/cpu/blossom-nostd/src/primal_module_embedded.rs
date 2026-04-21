@@ -904,62 +904,38 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
     /// fusing a layer will remove all existing virtual matchings with the layer
     pub fn fuse_layer(&mut self, dual_module: &mut impl DualInterface, layer_id: CompactLayerId) {
         let (layer_fusion, nodes) = (&mut self.layer_fusion, &mut self.nodes);
-        let dbg = unsafe { crate::dual_driver_tracked::FO_DBG_ENABLE };
-        if dbg {
-            println!("[pfuse] ENTER count_pending_breaks={}", layer_fusion.count_pending_breaks);
-        }
-        let mut visited: u32 = 0;
         layer_fusion.iterate_pending_breaks(|layer_fusion, node| {
-            if dbg {
-                println!("[pfuse] visit={visited} node={}", node.get());
-            }
-            visited = visited.wrapping_add(1);
-            if dbg { println!("[pfuse] before has_node"); }
             if !nodes.has_node(node) {
                 // it may happen that a blossom is expanded but its node index remains in the fusion list
                 // in this case, simply ignore this node
                 debug_assert!(nodes.is_blossom(node), "only blossom may encounter this");
-                if dbg { println!("[pfuse] !has_node → remove"); }
                 return true; // no longer an valid node
             }
-            if dbg { println!("[pfuse] before get_node_mut"); }
             let primal_node = nodes.get_node_mut(node);
-            if dbg { println!("[pfuse] before is_outer_blossom"); }
             if !primal_node.is_outer_blossom() {
-                if dbg { println!("[pfuse] !is_outer_blossom → remove"); }
                 return true; // no longer an active node
             }
-            if dbg { println!("[pfuse] before is_matched"); }
             if !primal_node.is_matched() {
-                if dbg { println!("[pfuse] !is_matched → remove"); }
                 return true; // no longer pending
             }
-            if dbg { println!("[pfuse] before get_matched"); }
             if let CompactMatchTarget::VirtualVertex(virtual_vertex) = primal_node.get_matched() {
-                if dbg { println!("[pfuse] matched_to_virtual vertex={}", virtual_vertex.get()); }
                 // A boundary virtual vertex may have no layer_id (it stays virtual for the
                 // entire streaming run). Such a matching never needs to be "broken" on layer
                 // fusion, so drop the pending entry instead of unwrapping None.
                 let Some(match_layer) = layer_fusion.get_layer_id(virtual_vertex).option() else {
-                    if dbg { println!("[pfuse] virtual vertex has no layer_id → remove"); }
                     return true;
                 };
                 if match_layer == layer_id {
-                    if dbg { println!("[pfuse] layer matches → break matching"); }
+                    // break the matching
                     primal_node.remove_from_matching();
                     nodes.set_speed(node, CompactGrowState::Grow, dual_module);
                     return true;
                 }
-                if dbg { println!("[pfuse] layer differs → keep pending"); }
                 false // keep it pending
             } else {
-                if dbg { println!("[pfuse] matched_to_peer → remove"); }
                 true // no longer pending
             }
         });
-        if dbg {
-            println!("[pfuse] EXIT visited={visited}");
-        }
     }
 }
 
