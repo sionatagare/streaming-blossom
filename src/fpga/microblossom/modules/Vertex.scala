@@ -196,10 +196,16 @@ case class Vertex(
     vertexPostExecuteState.io.message := stages.executeGet.message
     vertexPostExecuteState.io.isStalled := stages.executeGet.isStalled
     stages.executeSet2.state := vertexPostExecuteState.io.after
-    // liveChanged: True this cycle iff the live pipeline actually altered state
-    // for this vertex. Only meaningful when an SM instruction is at this stage.
-    io.liveChanged := stages.executeGet.message.valid &&
-      (vertexPostExecuteState.io.after.asBits =/= vertexPostExecuteState.io.before.asBits)
+    // liveChanged: True this cycle iff THIS ELASTIC vertex's live state actually changed.
+    // Only elastic (layer-0) vertices signal liveChanged; changes in higher fusion layers
+    // (L1, L2, ...) do NOT bootstrap archive scanning — those changes reach layer 0 later
+    // via archive_elastic_slice shifts.
+    if (elastic) {
+      io.liveChanged := stages.executeGet.message.valid &&
+        (vertexPostExecuteState.io.after.asBits =/= vertexPostExecuteState.io.before.asBits)
+    } else {
+      io.liveChanged := False
+    }
 
     if (elastic) {
       // Apply captured instruction to archived state

@@ -201,9 +201,9 @@ pub fn main() {
             );
 
             // Native latency from when the last fusion-layer syndrome is considered ready
-            // (`syndrome_finish`, same construction as batch) until **after** `archive_elastic_slice`
-            // returns (so decode + archive are included). Batch still ends at `get_last_finish_time`;
-            // streaming uses `get_native_time` at the end because archive does not update that latch.
+            // (`syndrome_finish`, same construction as batch) until decode has finished and
+            // right BEFORE `archive_elastic_slice`. This reports pure decoding latency in
+            // streaming mode; archive/shift overhead is excluded.
             let native_start = unsafe { extern_c::get_native_time() };
             let syndrome_start = native_start + syndrome_start_delay_cycle;
             let syndrome_finish = syndrome_start + finish_delta;
@@ -273,13 +273,14 @@ pub fn main() {
                 continue;
             }
 
-            // Archive: shifts layer state down, resets top layer for next measurement
-            dual_module.archive_elastic_slice();
-
-            let native_after_archive = unsafe { extern_c::get_native_time() };
+            let native_before_archive = unsafe { extern_c::get_native_time() };
             let hardware_diff =
-                unsafe { extern_c::diff_native_time(syndrome_finish, native_after_archive) } as f64;
+                unsafe { extern_c::diff_native_time(syndrome_finish, native_before_archive) } as f64;
             latency_benchmarker.record(hardware_diff);
+
+            // Archive: shifts layer state down, resets top layer for next measurement.
+            // Keep this after timing so the measured latency excludes archive overhead.
+            dual_module.archive_elastic_slice();
 
             let cpu_wall_diff = (unsafe { extern_c::get_fast_cpu_duration_ns(fast_start) } as f64) * 1e-9;
             let counter = unsafe { extern_c::get_instruction_counter() };

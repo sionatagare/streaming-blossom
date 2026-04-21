@@ -55,19 +55,19 @@ def plot_data_until_d9(this_dir: str):
 
 if __name__ == "__main__":
     data = []
-    # for d in d_vec:
-    #     latency_vec = []
-        # for p in p_vec:
-        #     benchmarker = DecodingSpeedBenchmarker(
-        #         this_dir=this_dir,
-        #         configuration=CircuitLevelFinalConfig(d=d),
-        #         p=p,
-        #         samples=SAMPLES,
-        #         use_layer_fusion=True,
-        #         enable_detailed_print=False,
-        #     )
-        #     result = benchmarker.run()
-        #     latency_vec.append(result.latency)
-        # data.append(latency_vec)
-        # save_data(data, this_dir)
+    for d in d_vec:
+        latency_vec = []
+        for p in p_vec:
+            benchmarker = DecodingSpeedBenchmarker(
+                this_dir=this_dir,
+                configuration=CircuitLevelFinalConfig(d=d),
+                p=p,
+                samples=SAMPLES,
+                use_layer_fusion=True,
+                enable_detailed_print=False,
+            )
+            result = benchmarker.run()
+            latency_vec.append(result.latency)
+        data.append(latency_vec)
+        save_data(data, this_dir)
     plot_data_until_d9(this_dir)
