@@ -34,6 +34,11 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
   if (config.contextBits > 0) { broadcastMessage.contextId := io.message.contextId }
   broadcastMessage.isReset := io.message.instruction.isReset
 
+  // Instrumentation: global cycle counter for diagnostic timestamps.
+  // Wraps at 2^32 which is fine for debugging streaming runs up to ~40s at 100MHz.
+  val globalCycle = Reg(UInt(32 bits)) init 0
+  globalCycle := globalCycle + 1
+
   // delay the signal so that the synthesizer can automatically balancing the registers
   val broadcastRegInserted = Delay(broadcastMessage, config.broadcastDelay)
   // broadcastRegInserted.addAttribute("keep")
@@ -299,6 +304,8 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     vertex.io.scanIndex := edgeScanIndex
     vertex.io.scanWritebackEn := scanWritebackEn
     vertex.io.scanWritebackIndex := scanWritebackIndex
+    vertex.io.scanFeeding := edgeScanFeeding
+    vertex.io.globalCycle := globalCycle
   }
 
   // build convergecast tree for maxGrowable
@@ -410,6 +417,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
   // before compiling the simulator, mark the fields as public to enable snapshot
   def simMakePublicSnapshot() = {
     io.elasticArchivePipelineBusy.simPublic()
+    globalCycle.simPublic()
     vertices.foreach(vertex => {
       vertex.register.simPublic()
       vertex.io.simPublic()
@@ -417,6 +425,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
         vertex.layersDebugAddr.simPublic()
         vertex.layersDebugData.simPublic()
         vertex.archivedRegs.foreach(_.simPublic())
+        vertex.slotLastScanCycle.foreach(_.simPublic())
       }
     })
     edges.foreach(edge => {
@@ -519,6 +528,13 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
           else { "archived_states" },
           Json.fromValues(vertex.archivedRegs.map(vertexStateJson))
         ))
+        // Instrumentation: last cycle each slot was touched by an active scan.
+        // 0 means never-scanned (still at register init value).
+        vertexMap += ((
+          if (abbrev) { "alsc" }
+          else { "slot_last_scan_cycle" },
+          Json.fromValues(vertex.slotLastScanCycle.map(r => Json.fromLong(r.toLong)))
+        ))
       }
       jsonVertices.append(Json.fromFields(vertexMap))
     })
@@ -579,7 +595,8 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     Json.fromFields(
       Map(
         "vertices" -> Json.fromValues(jsonVertices),
-        "edges" -> Json.fromValues(jsonEdges)
+        "edges" -> Json.fromValues(jsonEdges),
+        "global_cycle" -> Json.fromLong(globalCycle.toLong)
       )
     )
   }

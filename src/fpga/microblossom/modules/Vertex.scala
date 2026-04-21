@@ -82,6 +82,11 @@ case class Vertex(
     /** Scan writeback: the scan index that just exited the pipeline, and enable. */
     val scanWritebackIndex = in UInt (config.archiveAddressBits bits)
     val scanWritebackEn = in(Bool())
+    /** Scan feeding: high while scan is actively driving scanIndex at valid slots.
+      * Used by instrumentation to know when to timestamp scan visits. */
+    val scanFeeding = in(Bool())
+    /** Global cycle counter (from DistributedDual). Used by instrumentation. */
+    val globalCycle = in UInt (32 bits)
     // True when this cycle's archivedPostExecute actually altered archivedState
     // (the captured instruction produced a change). Used by DistributedDual to
     // gate activeDepth advancement in the windowed-scan design.
@@ -133,6 +138,18 @@ case class Vertex(
   if (elastic) {
     for (i <- 0 until archivedRegsDepth) {
       archivedRegs(i).init(VertexState.resetValue(config, vertexIndex))
+    }
+  }
+
+  // Instrumentation: per-slot "last time this slot was read by an active scan."
+  // When the stale-conflict watchdog fires, comparing this against the instruction
+  // history tells us whether a SetBlossom scan ever iterated the stuck slot.
+  val slotLastScanCycle =
+    if (elastic) Vec.fill(archivedRegsDepth)(Reg(UInt(32 bits)) init 0)
+    else null
+  if (elastic) {
+    when(io.scanFeeding) {
+      slotLastScanCycle(io.scanIndex) := io.globalCycle
     }
   }
 
