@@ -462,28 +462,41 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
 
     /// handle an up-to-date blossom need expand event
     pub fn resolve_blossom_need_expand(&mut self, dual_module: &mut impl DualInterface, blossom: CompactNodeIndex) -> bool {
+        let dbg = unsafe { crate::dual_driver_tracked::FO_DBG_ENABLE };
+        if dbg { println!("[rbne] pre-expand_blossom={}", blossom.get()); }
         dual_module.expand_blossom(self, blossom);
+        if dbg { println!("[rbne] post-expand_blossom"); }
         // the blossom is guaranteed to be a - node in the alternating tree, thus only 1 children
         let blossom_primal_node = self.nodes.get_node(blossom);
         let parent_index = usu!(blossom_primal_node.parent);
         let child_index = usu!(blossom_primal_node.first_child);
+        if dbg { println!("[rbne] parent={} child={}", parent_index.get(), child_index.get()); }
         let touch_to_parent = usu!(blossom_primal_node.link.touch);
         let touch_to_child = usu!(self.nodes.get_node(child_index).link.peer_touch);
         let inner_to_parent = self.nodes.get_second_outer_blossom(touch_to_parent);
         let inner_to_child = self.nodes.get_second_outer_blossom(touch_to_child);
+        if dbg { println!("[rbne] inner_to_parent={} inner_to_child={}", inner_to_parent.get(), inner_to_child.get()); }
         // find the index of the inner nodes in the odd cycle
         let mut cycle_index_parent = None;
         let mut cycle_index_child = None;
         let first_blossom_child = self.nodes.get_first_blossom_child(blossom);
+        if dbg { println!("[rbne] first_blossom_child={}", first_blossom_child.get()); }
         if first_blossom_child == inner_to_parent {
             cycle_index_parent = Some(0);
         }
         if first_blossom_child == inner_to_child {
             cycle_index_child = Some(0);
         }
+        if dbg { println!("[rbne] entering sibling walk"); }
         let mut inner_node = usu!(self.nodes.get_node(first_blossom_child).sibling);
         let mut cycle_index = 1;
         while inner_node != first_blossom_child {
+            if dbg && cycle_index <= 20 {
+                println!("[rbne] cycle_index={} inner_node={}", cycle_index, inner_node.get());
+            }
+            if dbg && cycle_index == 1000 {
+                println!("[rbne] WARNING: cycle_index hit 1000, sibling chain likely cyclic");
+            }
             if inner_node == inner_to_parent {
                 cycle_index_parent = Some(cycle_index);
             }
@@ -493,6 +506,7 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
             inner_node = usu!(self.nodes.get_node(inner_node).sibling);
             cycle_index += 1;
         }
+        if dbg { println!("[rbne] sibling walk done, cycle_index={}", cycle_index); }
         debug_assert!(cycle_index % 2 == 1, "should be an odd cycle");
         let cycle_length = cycle_index;
         let cycle_index_parent = usu!(cycle_index_parent);
