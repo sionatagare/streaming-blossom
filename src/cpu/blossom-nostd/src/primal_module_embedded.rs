@@ -904,7 +904,12 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
     /// fusing a layer will remove all existing virtual matchings with the layer
     pub fn fuse_layer(&mut self, dual_module: &mut impl DualInterface, layer_id: CompactLayerId) {
         let (layer_fusion, nodes) = (&mut self.layer_fusion, &mut self.nodes);
+        let dbg = unsafe { crate::dual_driver_tracked::FO_DBG_ENABLE };
+        if dbg { println!("[pfuse] ENTER count_pending_breaks={}", layer_fusion.count_pending_breaks); }
+        let mut visited: u32 = 0;
         layer_fusion.iterate_pending_breaks(|layer_fusion, node| {
+            if dbg { println!("[pfuse] visit={visited} node={}", node.get()); }
+            visited = visited.wrapping_add(1);
             if !nodes.has_node(node) {
                 // it may happen that a blossom is expanded but its node index remains in the fusion list
                 // in this case, simply ignore this node
@@ -936,6 +941,7 @@ impl<const N: usize, const VN: usize> PrimalModuleEmbedded<N, VN> {
                 true // no longer pending
             }
         });
+        if dbg { println!("[pfuse] EXIT visited={visited}"); }
     }
 }
 
