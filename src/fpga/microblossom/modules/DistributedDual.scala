@@ -2532,8 +2532,14 @@ class MultiLayerArchiveTest extends AnyFunSuite {
       }.toSeq
 
       // Speed encoding (Architecture.scala): 0=Stay, 1=Grow, 2=Shrink.
+      // Grow-speed cells advance grown by `length`. Shrink advances grown downward (clamped).
+      // Stay cells normally don't change, BUT an empty Stay cell (grown=0, !isDefect, !isVirtual)
+      // with a Grow-speed peer across a tight archived edge inherits the peer's blossom via
+      // VertexPostUpdateState peer-propagation — flipping its speed to Grow (grown remains 0).
+      // That's correct blossom behavior; the test must allow it.
       var growSlotsFound = 0
       var shrinkSlotsFound = 0
+      var propagatedSlotsFound = 0
       for (((vi, slotsBefore), (_, slotsAfter)) <- before.zip(after)) {
         for (s <- 0 until config.archiveDepth) {
           val (grownB, speedB) = slotsBefore(s)
@@ -2543,18 +2549,26 @@ class MultiLayerArchiveTest extends AnyFunSuite {
               growSlotsFound += 1
               assert(grownA - grownB == 3L,
                 s"Grow-speed slot (vertex $vi, slot $s) must advance by 3, got delta=${grownA - grownB}")
+              assert(speedA == 1L,
+                s"Grow-speed slot (vertex $vi, slot $s) must stay Grow, got speed=$speedA")
             case 2 =>  // Shrink
               shrinkSlotsFound += 1
-              // Shrink can advance downward (clamped at 0). Skip arithmetic check; coverage is the concern.
-            case _ =>  // Stay (0) or other — grown must not change
-              assert(grownA == grownB,
-                s"non-Grow/non-Shrink slot (vertex $vi, slot $s): speed=$speedB grown must not change, was $grownB now $grownA")
+              assert(speedA == 2L,
+                s"Shrink-speed slot (vertex $vi, slot $s) must stay Shrink, got speed=$speedA")
+            case _ =>  // Stay (0) or other
+              if (speedA != speedB) {
+                // Peer-propagation transition: Stay → Grow, grown must remain 0.
+                assert(speedB == 0L && speedA == 1L && grownA == 0L && grownB == 0L,
+                  s"unexpected transition at (vertex $vi, slot $s): speed $speedB→$speedA, grown $grownB→$grownA")
+                propagatedSlotsFound += 1
+              } else {
+                assert(grownA == grownB,
+                  s"non-Grow/non-Shrink slot (vertex $vi, slot $s): speed=$speedB grown must not change, was $grownB now $grownA")
+              }
           }
-          assert(speedA == speedB,
-            s"Grow instruction must not change speed at (vertex $vi, slot $s): $speedB → $speedA")
         }
       }
-      println(s"Grow-full-scan: Grow slots seen=$growSlotsFound, Shrink slots seen=$shrinkSlotsFound")
+      println(s"Grow-full-scan: Grow=$growSlotsFound, Shrink=$shrinkSlotsFound, peer-propagated=$propagatedSlotsFound")
       assert(growSlotsFound + shrinkSlotsFound > 0,
         "expected at least one Grow or Shrink slot somewhere in archive after fill")
     }
