@@ -285,7 +285,7 @@ mod tests {
         use micro_blossom_nostd::util::*;
 
         let graph_path = format!(
-            "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
+            "{}/../../../resources/graphs/example_phenomenological_rotated_d5.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let json_str = std::fs::read_to_string(&graph_path)
@@ -389,7 +389,7 @@ mod tests {
         use micro_blossom_nostd::util::*;
 
         let graph_path = format!(
-            "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
+            "{}/../../../resources/graphs/example_phenomenological_rotated_d5.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let json_str = std::fs::read_to_string(&graph_path)
@@ -1948,7 +1948,7 @@ mod tests {
         ];
 
         let graph_path = format!(
-            "{}/../../../resources/graphs/example_phenomenological_rotated_d3.json",
+            "{}/../../../resources/graphs/example_phenomenological_rotated_d5.json",
             env!("CARGO_MANIFEST_DIR")
         );
         let json_str = std::fs::read_to_string(&graph_path)
@@ -2155,4 +2155,431 @@ mod tests {
 
         println!("\n  === replay complete (inspect waveform for scanActive behavior) ===");
     }
+
+    // =====================================================================
+    // Streaming pipeline tests — mirror dual_module_looper_stale_slot_repro
+    // but assert on outcomes so regressions in the blossom_tracker guard,
+    // primal.fuse_layer None-layer handling, BlossomNeedExpand outdated
+    // purge, and tree-invariant bailout fixes surface as test failures.
+    // =====================================================================
+
+    /// Outcome of running a streaming session — enough to assert on correctness
+    /// without needing to reproduce the exact stale-slot diagnostics.
+    struct StreamingOutcome {
+        samples_run: usize,
+        total_solve_iters: u64,
+        max_solve_iters_per_sample: usize,
+        /// Firmware-style 3-strike watchdog: counts cases where the same Conflict
+        /// fingerprint (n1, n2, v1, v2) repeats 3× in a row — indicates thrashing.
+        stale_events: usize,
+        /// Hard iteration cap per sample exceeded.
+        watchdog_fires: usize,
+        /// Count of every obstacle observed whose primal view considers it
+        /// outdated (stale node id, absorbed inner blossom, etc.) — this is the
+        /// RTL-level "how often is HW reporting an obstacle primal can't directly
+        /// act on?" metric. High values indicate archive scan coverage is leaking
+        /// stale state.
+        stale_conflicts_observed: usize,
+        /// Total obstacles observed (denominator for stale_conflicts_observed).
+        obstacles_observed: usize,
+        panicked_samples: usize,
+    }
+
+    impl StreamingOutcome {
+        fn stale_ratio(&self) -> f64 {
+            if self.obstacles_observed == 0 { 0.0 }
+            else { self.stale_conflicts_observed as f64 / self.obstacles_observed as f64 }
+        }
+    }
+
+    /// Classify an obstacle as "stale" iff primal's own state thinks the event
+    /// is outdated — i.e. the resolve path would take one of the outdated-event
+    /// early-returns in [primal_module_embedded.rs]. Catches every case where
+    /// HW disagrees with primal (regardless of whether primal resolves the event
+    /// on first try or thrashes).
+    fn is_obstacle_stale(
+        primal: &crate::primal_module_embedded_adaptor::PrimalModuleEmbedded<MAX_NODE_NUM>,
+        obs: &CompactObstacle,
+    ) -> bool {
+        use micro_blossom_nostd::util::*;
+        match obs {
+            CompactObstacle::Conflict { node_1, node_2, .. } => {
+                let n1_stale = node_1
+                    .option()
+                    .map(|n| primal.nodes.has_node(n) && primal.nodes.get_outer_blossom(n) != n)
+                    .unwrap_or(false);
+                let n2_stale = node_2
+                    .option()
+                    .map(|n| primal.nodes.has_node(n) && primal.nodes.get_outer_blossom(n) != n)
+                    .unwrap_or(false);
+                n1_stale || n2_stale
+            }
+            CompactObstacle::BlossomNeedExpand { blossom } => {
+                let exists = primal.nodes.has_node(*blossom);
+                if !exists {
+                    return true; // primal already expanded it
+                }
+                let outer = primal.nodes.get_outer_blossom(*blossom);
+                if outer != *blossom {
+                    return true; // absorbed into a larger blossom
+                }
+                primal.nodes.get_grow_state(*blossom) != CompactGrowState::Shrink
+            }
+            _ => false,
+        }
+    }
+
+    /// Streaming pipeline helper. Replicates `dual_module_looper_stale_slot_repro`'s
+    /// inner loop but returns structured results instead of printing diagnostics, so
+    /// tests can assert on invariants (no infinite loops, bounded stale events, etc.).
+    ///
+    /// Parameters:
+    ///   * `seed` — RNG seed for defect selection.
+    ///   * `samples` — number of streaming samples to process.
+    ///   * `defect_probability` — per-top-vertex probability of being a defect.
+    ///   * `archive_depth` — archive size in rounds; also drives reset cadence.
+    ///   * `graph` — pre-loaded graph to use.
+    ///   * `blossom_begin` — primal's defect/blossom id boundary.
+    ///   * `solve_watchdog` — cap on solve-loop iterations per sample; exceeding
+    ///     counts as a `watchdog_fires` event and triggers reset+continue.
+    fn run_streaming_session(
+        graph: MicroBlossomSingle,
+        archive_depth: usize,
+        samples: usize,
+        defect_probability: f64,
+        blossom_begin: usize,
+        seed: u64,
+        solve_watchdog: usize,
+    ) -> StreamingOutcome {
+        use micro_blossom_nostd::util::*;
+        use rand_xoshiro::rand_core::{RngCore, SeedableRng};
+        use rand_xoshiro::Xoshiro256StarStar;
+
+        let num_layers = graph.layer_fusion.as_ref().unwrap().num_layers;
+        let top_layer_id = num_layers - 1;
+        let top_vertices: Vec<usize> = graph.layer_fusion.as_ref().unwrap().layers[top_layer_id]
+            .iter().copied().collect();
+
+        let (mut dual, mut primal, _graph, top_layer) =
+            make_streaming_env_from_graph(graph, archive_depth);
+        primal.nodes.blossom_begin = blossom_begin;
+        for layer_id in 0..num_layers {
+            dual.fuse_layer(layer_id as CompactLayerNum);
+            primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+        }
+
+        let mut rng = Xoshiro256StarStar::seed_from_u64(seed);
+        let mut node_offset: usize = 0;
+        let mut rounds_since_reset: usize = 0;
+        let mut outcome = StreamingOutcome {
+            samples_run: 0,
+            total_solve_iters: 0,
+            max_solve_iters_per_sample: 0,
+            stale_events: 0,
+            watchdog_fires: 0,
+            stale_conflicts_observed: 0,
+            obstacles_observed: 0,
+            panicked_samples: 0,
+        };
+
+        for _sample in 0..samples {
+            let defects: Vec<usize> = top_vertices.iter()
+                .filter(|_| (rng.next_u32() as f64 / u32::MAX as f64) < defect_probability)
+                .copied()
+                .collect();
+
+            // Bail if node_offset would collide with blossom_begin
+            if node_offset + defects.len() >= blossom_begin {
+                primal.reset();
+                dual.reset();
+                node_offset = 0;
+                rounds_since_reset = 0;
+                for layer_id in 0..num_layers {
+                    dual.fuse_layer(layer_id as CompactLayerNum);
+                    primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+                }
+                continue;
+            }
+
+            for (i, &v) in defects.iter().enumerate() {
+                dual.add_defect(ni!(v), ni!(node_offset + i));
+            }
+            dual.fuse_layer(top_layer);
+            primal.fuse_layer(&mut *dual, CompactLayerId::new(top_layer).unwrap());
+
+            let (mut obstacle, _) = dual.find_obstacle();
+            let mut prev_fp: Option<(u32, u32, u32, u32)> = None;
+            let mut streak: u32 = 0;
+            let mut solve_iters: usize = 0;
+            let mut watchdog_fired = false;
+            while !obstacle.is_none() {
+                outcome.obstacles_observed += 1;
+                if is_obstacle_stale(&primal, &obstacle) {
+                    outcome.stale_conflicts_observed += 1;
+                }
+                primal.resolve(&mut *dual, obstacle);
+                let (next_obs, _) = dual.find_obstacle();
+                obstacle = next_obs;
+
+                if let CompactObstacle::Conflict { node_1, node_2, vertex_1, vertex_2, .. } = obstacle {
+                    let fp = (
+                        node_1.option().map(|n| n.get() as u32).unwrap_or(u32::MAX),
+                        node_2.option().map(|n| n.get() as u32).unwrap_or(u32::MAX),
+                        vertex_1.get() as u32,
+                        vertex_2.get() as u32,
+                    );
+                    if prev_fp == Some(fp) {
+                        streak += 1;
+                        if streak >= 3 {
+                            outcome.stale_events += 1;
+                            watchdog_fired = true;
+                            break;
+                        }
+                    } else {
+                        streak = 0;
+                        prev_fp = Some(fp);
+                    }
+                } else {
+                    streak = 0;
+                    prev_fp = None;
+                }
+                solve_iters += 1;
+                if solve_iters >= solve_watchdog {
+                    outcome.watchdog_fires += 1;
+                    watchdog_fired = true;
+                    break;
+                }
+            }
+
+            outcome.total_solve_iters += solve_iters as u64;
+            if solve_iters > outcome.max_solve_iters_per_sample {
+                outcome.max_solve_iters_per_sample = solve_iters;
+            }
+            outcome.samples_run += 1;
+
+            if watchdog_fired {
+                primal.reset();
+                dual.reset();
+                node_offset = 0;
+                rounds_since_reset = 0;
+                for layer_id in 0..num_layers {
+                    dual.fuse_layer(layer_id as CompactLayerNum);
+                    primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+                }
+                continue;
+            }
+
+            dual.archive_elastic_slice();
+            node_offset += defects.len();
+            rounds_since_reset += 1;
+
+            if rounds_since_reset >= archive_depth || node_offset > blossom_begin - top_vertices.len() {
+                primal.reset();
+                dual.reset();
+                node_offset = 0;
+                rounds_since_reset = 0;
+                for layer_id in 0..num_layers {
+                    dual.fuse_layer(layer_id as CompactLayerNum);
+                    primal.fuse_layer(&mut *dual, CompactLayerId::new(layer_id as CompactLayerNum).unwrap());
+                }
+            }
+        }
+
+        outcome
+    }
+
+    fn load_graph(graph_relpath: &str) -> MicroBlossomSingle {
+        let path = format!("{}/../../../resources/graphs/{}", env!("CARGO_MANIFEST_DIR"), graph_relpath);
+        let json_str = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read graph {path}: {e}"));
+        serde_json::from_str(&json_str).expect("parse graph")
+    }
+
+    /// Baseline: low-p streaming completes without any watchdog or stale events.
+    /// Verifies the mainline decoder path: defect → fuse → solve → archive with
+    /// minimal stress. If this fails, the pipeline's happy path is broken.
+    #[test]
+    fn streaming_low_p_happy_path() {
+        let graph = load_graph("example_phenomenological_rotated_d5.json");
+        let outcome = run_streaming_session(
+            graph,
+            /*archive_depth*/ 8,
+            /*samples*/ 100,
+            /*defect_probability*/ 0.02,
+            /*blossom_begin*/ 128,
+            /*seed*/ 0xAAAA_BBBB,
+            /*solve_watchdog*/ 1_000,
+        );
+        println!("low-p happy path: {} samples, max_iters/sample={}, stale_events={}, wd={}, \
+                  stale_obstacles={}/{} ({:.1}%)",
+            outcome.samples_run, outcome.max_solve_iters_per_sample,
+            outcome.stale_events, outcome.watchdog_fires,
+            outcome.stale_conflicts_observed, outcome.obstacles_observed,
+            100.0 * outcome.stale_ratio());
+
+        assert_eq!(outcome.samples_run, 100, "should complete all samples");
+        assert_eq!(outcome.stale_events, 0,
+            "low-p streaming should not trigger stale-conflict streak");
+        assert_eq!(outcome.watchdog_fires, 0,
+            "low-p streaming should not exhaust solve watchdog");
+        // Low-p: primal's view and HW archive should mostly agree. A non-trivial
+        // stale ratio here means archive scan coverage is leaking even on easy inputs.
+        assert!(outcome.stale_ratio() < 0.10,
+            "low-p stale-conflict ratio {:.1}% exceeds 10% — archive scan coverage regression?",
+            100.0 * outcome.stale_ratio());
+    }
+
+    /// Stress test at high p. The pre-fix codebase would infinite-loop here because
+    /// the BlossomNeedExpand-outdated path re-fires the same tracker event. After
+    /// the fix, some stale events may still occur (expected), but every sample must
+    /// terminate within solve_watchdog iterations — no true hang.
+    #[test]
+    fn streaming_high_p_no_hang() {
+        let graph = load_graph("example_phenomenological_rotated_d5.json");
+        let samples = 200;
+        let outcome = run_streaming_session(
+            graph,
+            /*archive_depth*/ 8,
+            samples,
+            /*defect_probability*/ 0.3,
+            /*blossom_begin*/ 128,
+            /*seed*/ 0xC0FFEE,
+            /*solve_watchdog*/ 2_000,
+        );
+        println!("high-p stress: {} samples, max_iters/sample={}, stale_events={}, wd={}, \
+                  total_iters={}, stale_obstacles={}/{} ({:.1}%)",
+            outcome.samples_run, outcome.max_solve_iters_per_sample,
+            outcome.stale_events, outcome.watchdog_fires, outcome.total_solve_iters,
+            outcome.stale_conflicts_observed, outcome.obstacles_observed,
+            100.0 * outcome.stale_ratio());
+
+        assert_eq!(outcome.samples_run, samples, "all samples must terminate (no hang)");
+        assert!(outcome.watchdog_fires < samples / 2,
+            "more than half of samples hit solve watchdog ({} / {})", outcome.watchdog_fires, samples);
+        assert!(outcome.max_solve_iters_per_sample <= 2_000,
+            "solve_iters exceeded watchdog cap ({})", outcome.max_solve_iters_per_sample);
+        // At high p on windowed-archive-scan without the range-coverage fix, stale ratio was
+        // observed near 75% (per field report). On main (full-archive scan) it's typically
+        // under 30%. Use 60% as a "clearly regressed" threshold.
+        assert!(outcome.stale_ratio() < 0.60,
+            "high-p stale-conflict ratio {:.1}% exceeds 60% — archive scan coverage is \
+             likely leaking. On main this should be ~10-30%; if you're on windowed-archive-scan, \
+             this indicates the activeDepth gating is eating coverage.",
+            100.0 * outcome.stale_ratio());
+    }
+
+    /// Regression test: the blossom_tracker guard should silently absorb set_speed
+    /// calls for out-of-range blossom ids. Drive many reset cycles at high defect
+    /// density so the tracker is repeatedly cleared and repopulated — the pre-guard
+    /// codebase would panic here (heap corruption) on some reset boundary.
+    #[test]
+    fn streaming_tracker_guard_reset_cycles() {
+        let graph = load_graph("example_phenomenological_rotated_d5.json");
+        // archive_depth=4 → more frequent resets; samples=80 → at least 20 reset cycles
+        let outcome = run_streaming_session(
+            graph,
+            /*archive_depth*/ 4,
+            /*samples*/ 80,
+            /*defect_probability*/ 0.2,
+            /*blossom_begin*/ 128,
+            /*seed*/ 0xDEAD_BEEF,
+            /*solve_watchdog*/ 2_000,
+        );
+        println!("tracker-guard: {} samples across frequent resets, max_iters/sample={}, \
+                  stale_obstacles={}/{} ({:.1}%)",
+            outcome.samples_run, outcome.max_solve_iters_per_sample,
+            outcome.stale_conflicts_observed, outcome.obstacles_observed,
+            100.0 * outcome.stale_ratio());
+        assert_eq!(outcome.samples_run, 80, "samples must not panic across reset cycles");
+        // Frequent resets clear the tracker; if the guard is working, there should be no
+        // cascade of stale conflicts caused by tracker/primal desync across a reset boundary.
+        assert!(outcome.stale_ratio() < 0.50,
+            "tracker-guard test: stale ratio {:.1}% suggests reset cycles are triggering \
+             primal/tracker desync — guard regression?", 100.0 * outcome.stale_ratio());
+    }
+
+    /// Mirror a known pathological pattern — virtual-boundary matchings with
+    /// pending breaks accumulate across sample boundaries. Exercises the
+    /// primal.fuse_layer None-layer_id handling: pending_breaks entries pointing
+    /// at boundary virtuals (no layer_id) must be dropped, not unwrapped.
+    #[test]
+    fn streaming_virtual_boundary_pending_breaks() {
+        // Moderate p ensures some defects match boundary vertices, creating
+        // pending_breaks entries. Extended run so we cross multiple fuse_layer
+        // calls where stale entries would accumulate.
+        let graph = load_graph("example_phenomenological_rotated_d5.json");
+        let outcome = run_streaming_session(
+            graph,
+            /*archive_depth*/ 8,
+            /*samples*/ 300,
+            /*defect_probability*/ 0.15,
+            /*blossom_begin*/ 128,
+            /*seed*/ 0xFEED_FACE,
+            /*solve_watchdog*/ 2_000,
+        );
+        println!("virtual-boundary-breaks: {} samples, stale_events={}, wd={}, \
+                  stale_obstacles={}/{} ({:.1}%)",
+            outcome.samples_run, outcome.stale_events, outcome.watchdog_fires,
+            outcome.stale_conflicts_observed, outcome.obstacles_observed,
+            100.0 * outcome.stale_ratio());
+        assert_eq!(outcome.samples_run, 300, "must not hang in primal.fuse_layer None-layer path");
+    }
+
+    /// Deterministic replay: drive the same sequence twice with the same seed and
+    /// assert identical outcomes. If any fix introduces nondeterminism (e.g.
+    /// uninitialised memory read in the guard path), this catches it.
+    #[test]
+    fn streaming_deterministic_replay() {
+        let run_once = || {
+            let graph = load_graph("example_phenomenological_rotated_d5.json");
+            run_streaming_session(
+                graph,
+                /*archive_depth*/ 6,
+                /*samples*/ 50,
+                /*defect_probability*/ 0.2,
+                /*blossom_begin*/ 128,
+                /*seed*/ 0x1234_5678,
+                /*solve_watchdog*/ 2_000,
+            )
+        };
+        let a = run_once();
+        let b = run_once();
+        assert_eq!(a.samples_run, b.samples_run, "nondeterministic samples_run");
+        assert_eq!(a.total_solve_iters, b.total_solve_iters,
+            "nondeterministic total_solve_iters — uninitialised-memory read somewhere?");
+        assert_eq!(a.stale_events, b.stale_events, "nondeterministic stale count");
+        assert_eq!(a.watchdog_fires, b.watchdog_fires, "nondeterministic watchdog count");
+        assert_eq!(a.stale_conflicts_observed, b.stale_conflicts_observed,
+            "nondeterministic stale_conflicts_observed");
+        assert_eq!(a.obstacles_observed, b.obstacles_observed,
+            "nondeterministic obstacles_observed");
+    }
+
+    /// Direct measurement of the windowed-archive-scan branch's coverage problem.
+    /// Compare stale-conflict ratio at moderate p; regression threshold catches
+    /// the 75%-stale symptom observed on that branch. After the range-based
+    /// scan coverage fix is applied (per the Scala patch draft), this ratio
+    /// should fall substantially — tighten the threshold once that is verified.
+    #[test]
+    fn streaming_stale_ratio_budget() {
+        let graph = load_graph("example_phenomenological_rotated_d5.json");
+        let outcome = run_streaming_session(
+            graph,
+            /*archive_depth*/ 8,
+            /*samples*/ 150,
+            /*defect_probability*/ 0.2,
+            /*blossom_begin*/ 128,
+            /*seed*/ 0xBADCAFE,
+            /*solve_watchdog*/ 2_000,
+        );
+        println!("stale-ratio budget: {} samples, stale_obstacles={}/{} ({:.1}%), wd_fires={}",
+            outcome.samples_run, outcome.stale_conflicts_observed, outcome.obstacles_observed,
+            100.0 * outcome.stale_ratio(), outcome.watchdog_fires);
+        // Calibrate: 40% is the "clearly regressed" threshold. Tighten as the fix lands.
+        assert!(outcome.stale_ratio() < 0.40,
+            "moderate-p stale ratio {:.1}% is above 40%; archive scan coverage is likely \
+             under-including. Check DistributedDual.scala activeDepth/range-matching logic.",
+            100.0 * outcome.stale_ratio());
+    }
 }
+

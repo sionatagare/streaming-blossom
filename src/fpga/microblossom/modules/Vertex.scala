@@ -94,6 +94,12 @@ case class Vertex(
     // True when this cycle's vertexPostExecuteState actually altered live state.
     // Used by DistributedDual to activate layer 1 in the windowed-scan design.
     val liveChanged = out(Bool())
+    // Live vertex's current `register.node` and a validity flag (true iff the node
+    // is a real defect/blossom id, not IndexNone). Consumed by DistributedDual to
+    // compute per-slot min/max node at ArchiveElasticSlice commit so the archive
+    // scan can prune to only slots whose node range could contain the target id.
+    val liveNode = out(Bits(config.vertexBits bits))
+    val liveNodeValid = out(Bool())
     // final outputs
     val maxGrowable = out(ConvergecastMaxGrowable(config.weightBits))
   }
@@ -486,6 +492,17 @@ case class Vertex(
     io.shiftDonorLive.isVirtual := io.shiftSource.isVirtual
     io.shiftDonorLive.isDefect := io.shiftSource.isDefect
     io.shiftDonorLive.grown := io.shiftSource.grown
+  }
+
+  // Expose live state for DistributedDual's commit-time per-slot node-range reduction.
+  // Non-elastic vertices never reach archive, so return a sentinel that won't contribute
+  // to the min/max (liveNodeValid=false masks them out at the reduction site).
+  if (elastic) {
+    io.liveNode := register.node
+    io.liveNodeValid := register.node =/= B(config.IndexNone, config.vertexBits bits)
+  } else {
+    io.liveNode := B(0, config.vertexBits bits)
+    io.liveNodeValid := False
   }
 
   // inject registers

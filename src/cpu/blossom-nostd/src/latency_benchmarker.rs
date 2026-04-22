@@ -114,10 +114,16 @@ impl<const N: usize> LatencyBenchmarker<N> {
     /// print useful statistics like average, 80 percentile, 90, 99, 99.9 percentile, etc.
     pub fn print_statistics(&self) {
         if self.underflow_count > 0 {
-            println!("[warning] statistics may not be accurate because of underflow");
+            println!(
+                "[warning] statistics may not be accurate because of underflow (count={})",
+                self.underflow_count
+            );
         }
         if self.overflow_count > 0 {
-            println!("[warning] statistics may not be accurate because of overflow");
+            println!(
+                "[warning] statistics may not be accurate because of overflow (count={}, threshold={:.3e}s)",
+                self.overflow_count, self.upper
+            );
         }
         println!("average latency: {:.3e}s", self.average_latency());
         for percentile in [0.8, 0.9, 0.99, 0.999] {
