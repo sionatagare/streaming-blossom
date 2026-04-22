@@ -12,26 +12,31 @@ else:
     client = vitis.create_client(workspace=workspace)
 
 # create platform from XSA only if not exists
-if not client.list_platforms():
-    # remove the whole folder to avoid Exception: 'Cannot create platform
-    shutil.rmtree(workspace)
-    # create platform
+platform_xpfm = os.path.abspath(
+    os.path.join(workspace, name, "export", name, f"{name}.xpfm")
+)
+
+if not os.path.exists(platform_xpfm):
+    if os.path.exists(workspace):
+        shutil.rmtree(workspace)
+
+    client.set_workspace(path=workspace)
+
     platform = client.create_platform_component(
         name=name,
-        hw=f"./{name}.xsa",
+        hw_design=f"./{name}.xsa",
         os="standalone",
         cpu=cpus[0],
         domain_name=f"standalone_{cpus[0]}",
     )
     for cpu in cpus[1:]:
         platform.add_domain(cpu=cpu, os="standalone", name=f"standalone_{cpu}")
+
     status = platform.build()
-    # print(status)
-    # print(platform.list_domains())
+    print("platform build status:", status)
     platform.report()
 
-# create application component only if not exists
-platform_xpfm = client.get_platform(name)
+
 for cpu_id, cpu, arch in zip(cpu_ids, cpus, archs):
     try:
         component = client.get_component(name=f"benchmark_{cpu_id}")
