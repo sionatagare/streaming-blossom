@@ -2569,6 +2569,7 @@ class MultiLayerArchiveTest extends AnyFunSuite {
             (v.archivedRegs(s).grown.toLong, v.archivedRegs(s).speed.toLong)))
       }.toSeq
 
+      // Speed encoding (Architecture.scala): 0=Stay, 1=Grow, 2=Shrink.
       var growSlotsFound = 0
       var shrinkSlotsFound = 0
       for (((vi, slotsBefore), (_, slotsAfter)) <- before.zip(after)) {
@@ -2576,15 +2577,14 @@ class MultiLayerArchiveTest extends AnyFunSuite {
           val (grownB, speedB) = slotsBefore(s)
           val (grownA, speedA) = slotsAfter(s)
           speedB match {
-            case 0 =>  // Grow
+            case 1 =>  // Grow
               growSlotsFound += 1
               assert(grownA - grownB == 3L,
                 s"Grow-speed slot (vertex $vi, slot $s) must advance by 3, got delta=${grownA - grownB}")
             case 2 =>  // Shrink
               shrinkSlotsFound += 1
-              // Shrink advances downward by length (clamped at 0). Accept either behaviour
-              // since our concern here is coverage, not arithmetic.
-            case _ =>  // Stay or other — grown must not change
+              // Shrink can advance downward (clamped at 0). Skip arithmetic check; coverage is the concern.
+            case _ =>  // Stay (0) or other — grown must not change
               assert(grownA == grownB,
                 s"non-Grow/non-Shrink slot (vertex $vi, slot $s): speed=$speedB grown must not change, was $grownB now $grownA")
           }
