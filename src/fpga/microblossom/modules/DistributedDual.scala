@@ -246,41 +246,25 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     val wantsScan = affectsArchive && (archiveValidCount > 0) && (needsFullScan || needsRangeScan)
 
     /*
-     * Scan pipeline (one pending stage between decision and FSM start, so the gate
-     * feeds a register instead of driving scanActive's next-state combinationally):
-     *   decision cycle: latch wantsScan → scanPending, capture per-scan fields.
-     *   start cycle:    scanPending=True → scanActive := True, scanTick := 0.
-     *   feed cycles:    archiveValidCount ticks, reverse order (newest first).
-     *   drain cycles:   executeLatency + fusionExtra - 1 extra ticks for writeback.
-     *   end cycle:      optional global widening if this was a SetBlossom that rewrote any slot.
-     * archiveBusy stalls upstream across all stages (scanActive || scanPending).
+     * Scan FSM (preserves original single-cycle decision-to-start timing):
+     *   trigger: affectsArchive && !scanActive && wantsScan → scanActive := True,
+     *            scanTick := 0, scanTopReg := archiveValidCount - 1, capture fields.
+     *   feed:    archiveValidCount ticks, reverse order (newest first).
+     *   drain:   executeLatency + fusionExtra - 1 extra ticks for writeback.
+     *   end:     optional global widening on SetBlossom that rewrote any slot.
      */
-    val scanPending          = Reg(Bool()) init False
-    val pendingIsSetBlossom  = Reg(Bool()) init False
-    val pendingField2        = Reg(UInt(config.vertexBits bits)) init 0
     val scanTopReg           = Reg(UInt(config.archiveAddressBits bits)) init 0
-
     val capturedField2       = Reg(UInt(config.vertexBits bits)) init 0
     val capturedIsSetBlossom = Reg(Bool()) init False
     val scanWroteNewNode     = Reg(Bool()) init False
 
-    // Decision stage
-    scanPending := False
-    when(!scanActive && !scanPending && wantsScan) {
-      scanPending         := True
-      pendingIsSetBlossom := instr.isSetBlossom
-      pendingField2       := instr.field2.asUInt.resize(config.vertexBits)
-      // Latch (archiveValidCount - 1) once here; avoids a per-cycle subtraction
-      // chained with scanTick during feed/writeback.
-      scanTopReg          := (archiveValidCount - 1).resize(config.archiveAddressBits)
-    }
-
-    // Start stage
-    when(scanPending && !scanActive) {
+    when(!scanActive && wantsScan) {
       scanActive           := True
       scanTick             := 0
-      capturedField2       := pendingField2
-      capturedIsSetBlossom := pendingIsSetBlossom
+      // Latch (archiveValidCount - 1) once here; avoids chained subtraction each cycle.
+      scanTopReg           := (archiveValidCount - 1).resize(config.archiveAddressBits)
+      capturedField2       := instr.field2.asUInt.resize(config.vertexBits)
+      capturedIsSetBlossom := instr.isSetBlossom
       scanWroteNewNode     := False
     }
 
@@ -329,10 +313,9 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     scanWritebackEn    := writebackValid
     scanWritebackIndex := reversedWritebackIndex.resize(config.archiveAddressBits)
 
-    val archiveBusy = scanActive || scanPending
-    io.elasticArchivePipelineBusy := archiveBusy
-    // Block subsequent instructions across decision, feed, and drain cycles.
-    broadcastMessage.valid := io.message.valid && !archiveBusy
+    io.elasticArchivePipelineBusy := scanActive
+    // Let the triggering instruction through; block subsequent ones while scanning.
+    broadcastMessage.valid := io.message.valid && !scanActive
   } else {
     archiveCommitEn := False
     edgeScanActive := False
