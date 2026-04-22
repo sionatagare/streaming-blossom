@@ -145,8 +145,8 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
   // null when this build has no elastic vertices (non-archive config).
   var archiveValidCount: UInt = null
   var archiveWriteCounter: UInt = null
-  var slotMinNodeReg: Vec[UInt] = null
-  var slotMaxNodeReg: Vec[UInt] = null
+  var globalMinNodeReg: UInt = null
+  var globalMaxNodeReg: UInt = null
 
   if (firstLayerVertexIndices.nonEmpty) {
     val warmupThreshold = config.numLayers.toInt - 1  // shifts needed before data reaches layer 0
@@ -166,25 +166,19 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     val scanTickWidth = config.archiveAddressBits + log2Up(config.executeLatency + fusionExtra + 1) + 1
     val scanTick = Reg(UInt(scanTickWidth bits)) init 0
 
-    // Per-slot node-ID range metadata. On ArchiveElasticSlice commit, we capture the
-    // min and max of live.state.node across all elastic vertices into these registers
-    // for the new slot. A subsequent SetSpeed/SetBlossom scan over target X only
-    // needs to visit slots where `min_node(d) <= X <= max_node(d)` — other slots
-    // cannot contain X and can be skipped. Replaces the earlier activeDepth ratchet
-    // heuristic which had coverage gaps for non-incremental modifications.
+    // Global node-ID range across all valid archive slots. On ArchiveElasticSlice
+    // commit, the min/max of live.state.node across elastic vertices widens this
+    // range. A SetSpeed/SetBlossom targeting node X can skip the scan entirely iff
+    // X lies outside [globalMin, globalMax]; when X is in range, we scan the full
+    // archive. The scan itself only rewrites cells whose node matches X, so scanning
+    // a slot that doesn't actually contain X is wasteful-but-harmless.
     //
-    // Sentinels: min_node = all-ones (IndexNone), max_node = 0 means "no defects in
-    // this slot" → no instruction ever matches → slot is skipped.
-    val activeDepthWidth = config.archiveAddressBits + 2
-    slotMinNodeReg = Vec.fill(config.archiveDepth)(
-      Reg(UInt(config.vertexBits bits)) init ((BigInt(1) << config.vertexBits) - 1)
-    )
-    slotMaxNodeReg = Vec.fill(config.archiveDepth)(
-      Reg(UInt(config.vertexBits bits)) init 0
-    )
-    // Expose for simulation inspection — tests read these to verify range metadata.
-    slotMinNodeReg.foreach(_.simPublic())
-    slotMaxNodeReg.foreach(_.simPublic())
+    // Sentinels: min = all-ones (IndexNone), max = 0. Any real node strictly widens
+    // the range on first commit, so no separate "archive has any slot" flag needed.
+    globalMinNodeReg = Reg(UInt(config.vertexBits bits)) init ((BigInt(1) << config.vertexBits) - 1)
+    globalMaxNodeReg = Reg(UInt(config.vertexBits bits)) init 0
+    globalMinNodeReg.simPublic()
+    globalMaxNodeReg.simPublic()
     archiveValidCount.simPublic()
     archiveWriteCounter.simPublic()
 
@@ -197,8 +191,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
         broadcastRegInserted.instruction.needsArchivedScan()
 
     // Combinational min/max of live.state.node across elastic vertices, used at commit.
-    // Non-elastic vertices mask out via liveNodeValid. Sentinel IndexNone-value for
-    // slots with no real nodes means no instruction will ever match that slot.
+    // Non-elastic vertices mask out via liveNodeValid; sentinel contributions are idempotent.
     val elasticVertexIos = vertices.collect { case v if v.elastic => v.io }
     val minNodeSentinel = U((BigInt(1) << config.vertexBits) - 1, config.vertexBits bits)
     val maxNodeSentinel = U(0, config.vertexBits bits)
@@ -214,146 +207,132 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     } else maxNodeSentinel
 
     // On ArchiveElasticSlice: always increment total count; only commit after warmup.
-    // On commit, snapshot min/max node into the new slot's metadata.
+    // On commit, widen the global range by the new slot's contribution.
     when(isArchiveSlice) {
       archiveTotalCount := archiveTotalCount + 1
       when(warmupDone && (archiveValidCount < config.archiveDepth)) {
         archiveWriteCounter := archiveWriteCounter + 1
         archiveValidCount := archiveValidCount + 1
-        slotMinNodeReg(archiveWriteCounter) := commitMinNode
-        slotMaxNodeReg(archiveWriteCounter) := commitMaxNode
+        when(commitMinNode < globalMinNodeReg) { globalMinNodeReg := commitMinNode }
+        when(commitMaxNode > globalMaxNodeReg) { globalMaxNodeReg := commitMaxNode }
       }
     }
 
-    // On Reset: clear all archive state and per-slot metadata.
+    // On Reset: clear all archive state and global range metadata.
     when(broadcastRegInserted.valid && broadcastRegInserted.instruction.isReset()) {
       archiveTotalCount := 0
       archiveWriteCounter := 0
       archiveValidCount := 0
-      for (i <- 0 until config.archiveDepth) {
-        slotMinNodeReg(i) := minNodeSentinel
-        slotMaxNodeReg(i) := maxNodeSentinel
-      }
+      globalMinNodeReg := minNodeSentinel
+      globalMaxNodeReg := maxNodeSentinel
     }
 
     archiveCommitEn := warmupDone && (archiveValidCount < config.archiveDepth)
 
-    // Determine scan depth from per-slot range metadata:
-    //   - Grow affects every slot's `grown` field → full scan (archiveValidCount).
-    //   - SetSpeed/SetBlossom target a specific node id (field1); scan only slots
-    //     whose [min_node, max_node] range could contain it. The "deepest" such
-    //     slot (smallest archive index, i.e. oldest) sets effectiveDepth; the scan
-    //     still iterates contiguously from newest down to that depth.
-    //   - Match (rare): treat as full scan for safety.
+    // Gate: does this instruction want to trigger a scan?
+    //   Grow / Match            → full scan whenever any valid slot exists.
+    //   SetSpeed / SetBlossom   → full scan iff target ∈ [globalMin, globalMax].
+    // Replaces the earlier per-slot range vector + priority-encoder chain (which
+    // blew timing at d=5). Precision drops: we no longer prune to the deepest
+    // matching slot, but the common in-range skip is preserved.
     val instr = broadcastRegInserted.instruction
     val isGrowInst = instr.isExtended && instr.isGrow
     val isRangeTargetedInst = instr.isSetSpeed || instr.isSetBlossom
     val isMatchInst = instr.opCode === OpCode.Match
     val target = instr.field1.asUInt.resize(config.vertexBits)
-    // Per-archive-index match: slot i is in range iff it's valid and min <= target <= max.
-    // Archive index layout: index 0 = oldest, archiveValidCount-1 = newest.
-    val slotMatches = Vec.tabulate(config.archiveDepth) { i =>
-      val slotValid = U(i, activeDepthWidth bits) < archiveValidCount.resize(activeDepthWidth)
-      val inRange = slotMinNodeReg(i) <= target && target <= slotMaxNodeReg(i)
-      slotValid && inRange
-    }
-    val anyRangeMatch = slotMatches.asBits.orR
-    // Deepest match = smallest archive index among matching slots.
-    // effectiveDepth = archiveValidCount - firstMatchIdx (when any match).
-    val firstMatchIdx = OHToUInt(OHMasking.first(slotMatches.asBits)).resize(activeDepthWidth)
-    val effectiveDepthTargeted = Mux(
-      anyRangeMatch,
-      archiveValidCount.resize(activeDepthWidth) - firstMatchIdx,
-      U(0, activeDepthWidth bits)
-    )
-    val effectiveDepth =
-      Mux(isGrowInst || isMatchInst,
-        archiveValidCount.resize(activeDepthWidth),
-        Mux(isRangeTargetedInst, effectiveDepthTargeted, U(0, activeDepthWidth bits))
-      )
-    val hasScan = archiveValidCount > 0 && effectiveDepth > 0
+    val targetInRange = target >= globalMinNodeReg && target <= globalMaxNodeReg
+    val needsFullScan = isGrowInst || isMatchInst
+    val needsRangeScan = isRangeTargetedInst && targetInRange
+    val wantsScan = affectsArchive && (archiveValidCount > 0) && (needsFullScan || needsRangeScan)
 
     /*
-     * Scan FSM:
-     *   idle: instruction enters live pipeline
-     *     - If needsArchivedScan && hasScan (effectiveDepth > 0): start scan
-     *   scan: feed effectiveDepth indices (reverse order, newest first), then drain
-     *     - On completion: optionally widen slot_min/max metadata to reflect
-     *       any SetBlossom rewrites that changed slots' node fields.
+     * Scan pipeline (one pending stage between decision and FSM start, so the gate
+     * feeds a register instead of driving scanActive's next-state combinationally):
+     *   decision cycle: latch wantsScan → scanPending, capture per-scan fields.
+     *   start cycle:    scanPending=True → scanActive := True, scanTick := 0.
+     *   feed cycles:    archiveValidCount ticks, reverse order (newest first).
+     *   drain cycles:   executeLatency + fusionExtra - 1 extra ticks for writeback.
+     *   end cycle:      optional global widening if this was a SetBlossom that rewrote any slot.
+     * archiveBusy stalls upstream across all stages (scanActive || scanPending).
      */
-    // Capture the scan-triggering instruction's field2 (new blossom id for SetBlossom)
-    // so we can widen slot metadata at scan completion. Without widening, a SetBlossom
-    // rewrite that changes slot.node from X to Y leaves slotMax < Y, causing the next
-    // SetSpeed targeting Y to incorrectly skip this slot.
-    val capturedField2 = Reg(UInt(config.vertexBits bits)) init 0
+    val scanPending          = Reg(Bool()) init False
+    val pendingIsSetBlossom  = Reg(Bool()) init False
+    val pendingField2        = Reg(UInt(config.vertexBits bits)) init 0
+    val scanTopReg           = Reg(UInt(config.archiveAddressBits bits)) init 0
+
+    val capturedField2       = Reg(UInt(config.vertexBits bits)) init 0
     val capturedIsSetBlossom = Reg(Bool()) init False
-    when(affectsArchive && !scanActive && hasScan) {
-      scanActive := True
-      scanTick := 0
-      capturedField2 := instr.field2.asUInt.resize(config.vertexBits)
-      capturedIsSetBlossom := instr.isSetBlossom
+    val scanWroteNewNode     = Reg(Bool()) init False
+
+    // Decision stage
+    scanPending := False
+    when(!scanActive && !scanPending && wantsScan) {
+      scanPending         := True
+      pendingIsSetBlossom := instr.isSetBlossom
+      pendingField2       := instr.field2.asUInt.resize(config.vertexBits)
+      // Latch (archiveValidCount - 1) once here; avoids a per-cycle subtraction
+      // chained with scanTick during feed/writeback.
+      scanTopReg          := (archiveValidCount - 1).resize(config.archiveAddressBits)
     }
 
-    // End of scan: effectiveDepth feed ticks + drain (executeLatency + fusionExtra - 1)
-    val scanEndTick = effectiveDepth.resize(scanTickWidth) + U((config.executeLatency + fusionExtra - 1) max 0, scanTickWidth bits)
-    val anyArchivedChanged = vertices.map(_.io.archivedChanged).reduceBalancedTree(_ || _)
-    val scanWroteNewNode = Reg(Bool()) init False
-    when(affectsArchive && !scanActive && hasScan) {
-      scanWroteNewNode := False
+    // Start stage
+    when(scanPending && !scanActive) {
+      scanActive           := True
+      scanTick             := 0
+      capturedField2       := pendingField2
+      capturedIsSetBlossom := pendingIsSetBlossom
+      scanWroteNewNode     := False
     }
+
+    // End of scan: archiveValidCount feed ticks + drain (executeLatency + fusionExtra - 1).
+    // archiveValidCount is stable during the scan (isArchiveSlice blocked upstream).
+    val scanEndTick = archiveValidCount.resize(scanTickWidth) +
+      U((config.executeLatency + fusionExtra - 1) max 0, scanTickWidth bits)
+    val anyArchivedChanged = vertices.map(_.io.archivedChanged).reduceBalancedTree(_ || _)
+
     when(scanActive) {
       when(scanTick === scanEndTick) {
         scanActive := False
-        // If this was a SetBlossom and the scan actually rewrote slots, conservatively
-        // widen every valid slot's [min, max] to include the new blossom id. This
-        // preserves correctness: a slot that was rewritten to contain capturedField2
-        // must remain within the range for subsequent SetSpeed scans targeting that id.
-        // Widening is pessimistic (may include slots that weren't actually rewritten),
-        // but never misses a slot that should be scanned.
+        // If this was a SetBlossom and the scan rewrote any slot, widen the global
+        // range by capturedField2 so the next SetSpeed on the new id remains in-range.
         when(capturedIsSetBlossom && scanWroteNewNode) {
-          for (i <- 0 until config.archiveDepth) {
-            when(U(i, activeDepthWidth bits) < archiveValidCount.resize(activeDepthWidth)) {
-              when(slotMaxNodeReg(i) < capturedField2) {
-                slotMaxNodeReg(i) := capturedField2
-              }
-              when(slotMinNodeReg(i) > capturedField2) {
-                slotMinNodeReg(i) := capturedField2
-              }
-            }
-          }
+          when(capturedField2 > globalMaxNodeReg) { globalMaxNodeReg := capturedField2 }
+          when(capturedField2 < globalMinNodeReg) { globalMinNodeReg := capturedField2 }
         }
       } otherwise {
         scanTick := scanTick + 1
       }
     }
 
-    // Feed phase: effectiveDepth ticks. Reverse order (newest first, matching existing convention).
-    val scanFeeding = scanActive && (scanTick < effectiveDepth.resize(scanTickWidth))
+    // Feed phase: archiveValidCount ticks. Reverse order (newest first).
+    val scanFeeding = scanActive && (scanTick < archiveValidCount.resize(scanTickWidth))
 
     // Writeback: each feed at tick T produces a writeback at tick T + executeLatency.
     val writebackTick = scanTick - U(config.executeLatency, scanTickWidth bits)
     val writebackValid = scanActive && (scanTick >= U(config.executeLatency, scanTickWidth bits)) &&
-      (writebackTick < effectiveDepth.resize(scanTickWidth))
+      (writebackTick < archiveValidCount.resize(scanTickWidth))
 
-    // Track whether this scan has rewritten any slot's node (used for metadata widening).
+    // Track whether this scan rewrote any slot's node (gates metadata widening).
     when(scanActive && writebackValid && anyArchivedChanged) {
       scanWroteNewNode := True
     }
 
-    // Reverse scan: newest slot (archiveValidCount-1) first, walking up toward slot 0 (oldest).
-    val reversedScanIndex = (archiveValidCount - 1).resize(scanTickWidth) - scanTick
-    val reversedWritebackIndex = (archiveValidCount - 1).resize(scanTickWidth) - writebackTick
+    // Reverse scan: scanTopReg = (archiveValidCount-1) latched at scan start.
+    // One subtraction per cycle, not two chained.
+    val reversedScanIndex      = scanTopReg - scanTick.resize(config.archiveAddressBits)
+    val reversedWritebackIndex = scanTopReg - writebackTick.resize(config.archiveAddressBits)
 
-    edgeScanActive := scanActive
-    edgeScanFeeding := scanFeeding
-    edgeScanIndex := reversedScanIndex.resize(config.archiveAddressBits)
-    archiveWriteAddr := archiveWriteCounter
-    scanWritebackEn := writebackValid
+    edgeScanActive     := scanActive
+    edgeScanFeeding    := scanFeeding
+    edgeScanIndex      := reversedScanIndex.resize(config.archiveAddressBits)
+    archiveWriteAddr   := archiveWriteCounter
+    scanWritebackEn    := writebackValid
     scanWritebackIndex := reversedWritebackIndex.resize(config.archiveAddressBits)
 
-    io.elasticArchivePipelineBusy := scanActive
-    // Let the triggering instruction through; block subsequent ones
-    broadcastMessage.valid := io.message.valid && !scanActive
+    val archiveBusy = scanActive || scanPending
+    io.elasticArchivePipelineBusy := archiveBusy
+    // Block subsequent instructions across decision, feed, and drain cycles.
+    broadcastMessage.valid := io.message.valid && !archiveBusy
   } else {
     archiveCommitEn := False
     edgeScanActive := False
@@ -2569,6 +2548,7 @@ class MultiLayerArchiveTest extends AnyFunSuite {
             (v.archivedRegs(s).grown.toLong, v.archivedRegs(s).speed.toLong)))
       }.toSeq
 
+      // Speed encoding (Architecture.scala): 0=Stay, 1=Grow, 2=Shrink.
       var growSlotsFound = 0
       var shrinkSlotsFound = 0
       for (((vi, slotsBefore), (_, slotsAfter)) <- before.zip(after)) {
@@ -2576,15 +2556,14 @@ class MultiLayerArchiveTest extends AnyFunSuite {
           val (grownB, speedB) = slotsBefore(s)
           val (grownA, speedA) = slotsAfter(s)
           speedB match {
-            case 0 =>  // Grow
+            case 1 =>  // Grow
               growSlotsFound += 1
               assert(grownA - grownB == 3L,
                 s"Grow-speed slot (vertex $vi, slot $s) must advance by 3, got delta=${grownA - grownB}")
             case 2 =>  // Shrink
               shrinkSlotsFound += 1
-              // Shrink advances downward by length (clamped at 0). Accept either behaviour
-              // since our concern here is coverage, not arithmetic.
-            case _ =>  // Stay or other — grown must not change
+              // Shrink can advance downward (clamped at 0). Skip arithmetic check; coverage is the concern.
+            case _ =>  // Stay (0) or other — grown must not change
               assert(grownA == grownB,
                 s"non-Grow/non-Shrink slot (vertex $vi, slot $s): speed=$speedB grown must not change, was $grownB now $grownA")
           }
@@ -2803,15 +2782,13 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         s"test requires reusedId ($reusedId) to land at ≥2 distinct archive depths " +
         s"in GC-protected cells; got $distinctDepths")
 
-      // Snapshot slot_min/max metadata — is `reusedId` actually inside every slot's range?
+      // Snapshot global range metadata — is `reusedId` inside [globalMin, globalMax]?
       val avc = dut.archiveValidCount.toInt
+      val gMin = dut.globalMinNodeReg.toLong
+      val gMax = dut.globalMaxNodeReg.toLong
+      val inRange = gMin <= reusedId.toLong && reusedId.toLong <= gMax
       println(s"[metadata] archiveValidCount=$avc archiveWriteCounter=${dut.archiveWriteCounter.toInt}")
-      for (i <- 0 until config.archiveDepth) {
-        val mn = dut.slotMinNodeReg(i).toLong
-        val mx = dut.slotMaxNodeReg(i).toLong
-        val inRange = mn <= reusedId.toLong && reusedId.toLong <= mx
-        println(s"[metadata] slot[$i] min=$mn max=$mx target=$reusedId inRange=$inRange")
-      }
+      println(s"[metadata] globalMin=$gMin globalMax=$gMax target=$reusedId inRange=$inRange")
 
       // Snapshot speeds before SetSpeed.
       val speedsBefore = targetCells.map { case (vi, s) =>
@@ -2841,11 +2818,10 @@ class MultiLayerArchiveTest extends AnyFunSuite {
     }
   }
 
-  test("range-coverage: match only in newest slot → effectiveDepth=1, only newest visited") {
-    // Fill 3 slots with node id A, then 1 slot with node id B. Target B — only the
-    // newest slot matches. Verify: slot 3 (newest) flips; slots 0..2 (with id A,
-    // outside B's range) stay untouched (scan doesn't visit them because
-    // effectiveDepth = archiveValidCount - firstMatchIdx = 4 - 3 = 1).
+  test("range-coverage: scan rewrites only target cells, leaving non-matching cells alone") {
+    // Fill 3 slots with node id A, then 1 slot with node id B. Target B. The global
+    // range covers both A and B, so the full archive is scanned, but only cells
+    // whose node == B get their speed rewritten. Cells with node == A must stay put.
     val (config, ioConfig, compiled) = MultiLayerArchiveSimCache.archiveDepth4
     compiled.doSim("testRangeMatchNewestOnly") { dut =>
       dut.io.message.valid #= false
@@ -2871,12 +2847,10 @@ class MultiLayerArchiveTest extends AnyFunSuite {
       dut.simExecute(ioConfig.instructionSpec.generateArchiveElasticSlice())
       sleep(1)
 
-      println(s"[newest-only] slot metadata after fill:")
-      for (i <- 0 until config.archiveDepth) {
-        println(s"  slot[$i] min=${dut.slotMinNodeReg(i).toLong} max=${dut.slotMaxNodeReg(i).toLong}")
-      }
+      println(s"[newest-only] global range after fill: [${dut.globalMinNodeReg.toLong}, ${dut.globalMaxNodeReg.toLong}]")
 
-      // Target B: should match ONLY in the newest slot (highest archive index).
+      // Target B: in the global range (B >= min and B <= max), so the archive
+      // is scanned; only cells with node == B get rewritten.
       val speedsBefore = (0 until config.archiveDepth).map { s =>
         dut.vertices.collect { case v if v.elastic =>
           (v.archivedRegs(s).node.toLong, v.archivedRegs(s).speed.toLong, v.archivedRegs(s).isDefect.toBoolean, v.archivedRegs(s).grown.toLong)
@@ -2936,14 +2910,11 @@ class MultiLayerArchiveTest extends AnyFunSuite {
         sleep(1)
       }
 
-      println(s"[boundary] slot metadata after mixed-id fill:")
-      for (i <- 0 until config.archiveDepth) {
-        println(s"  slot[$i] min=${dut.slotMinNodeReg(i).toLong} max=${dut.slotMaxNodeReg(i).toLong}")
-      }
+      println(s"[boundary] global range after mixed-id fill: [${dut.globalMinNodeReg.toLong}, ${dut.globalMaxNodeReg.toLong}]")
 
       // Snapshot pre-test state, targeting id=6 (strictly between 3 and 9, not in archive).
-      // If any slot has min<=6<=max, the range reports match (false positive), but nothing
-      // should actually flip since no cell's node equals 6. Speeds must be unchanged everywhere.
+      // globalMin<=6<=globalMax so the scan runs, but nothing should actually flip
+      // since no cell's node equals 6. Speeds must be unchanged everywhere.
       val speedsBefore = (0 until config.archiveDepth).map { s =>
         dut.vertices.collect { case v if v.elastic => (v.archivedRegs(s).node.toLong, v.archivedRegs(s).speed.toLong) }
       }
@@ -3017,17 +2988,11 @@ class MultiLayerArchiveTest extends AnyFunSuite {
       } yield (vi, s)
       assume(initialCells.nonEmpty, "fill produced no GC-protected cells with node=4")
 
-      println(s"[chain] pre metadata:")
-      for (i <- 0 until config.archiveDepth) {
-        println(s"  slot[$i] min=${dut.slotMinNodeReg(i).toLong} max=${dut.slotMaxNodeReg(i).toLong}")
-      }
+      println(s"[chain] pre metadata: global=[${dut.globalMinNodeReg.toLong}, ${dut.globalMaxNodeReg.toLong}]")
 
       dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(4, 16001))
       sleep(2)
-      println(s"[chain] after SetBlossom(4, 16001):")
-      for (i <- 0 until config.archiveDepth) {
-        println(s"  slot[$i] min=${dut.slotMinNodeReg(i).toLong} max=${dut.slotMaxNodeReg(i).toLong}")
-      }
+      println(s"[chain] after SetBlossom(4, 16001): global=[${dut.globalMinNodeReg.toLong}, ${dut.globalMaxNodeReg.toLong}]")
       // Cells previously at node=4 should now be at 16001.
       for ((vi, s) <- initialCells) {
         val n = dut.vertices(vi).archivedRegs(s).node.toLong
@@ -3037,10 +3002,7 @@ class MultiLayerArchiveTest extends AnyFunSuite {
 
       dut.simExecute(ioConfig.instructionSpec.generateSetBlossom(16001, 16002))
       sleep(2)
-      println(s"[chain] after SetBlossom(16001, 16002):")
-      for (i <- 0 until config.archiveDepth) {
-        println(s"  slot[$i] min=${dut.slotMinNodeReg(i).toLong} max=${dut.slotMaxNodeReg(i).toLong}")
-      }
+      println(s"[chain] after SetBlossom(16001, 16002): global=[${dut.globalMinNodeReg.toLong}, ${dut.globalMaxNodeReg.toLong}]")
       for ((vi, s) <- initialCells) {
         val n = dut.vertices(vi).archivedRegs(s).node.toLong
         assert(n == 16002L,
