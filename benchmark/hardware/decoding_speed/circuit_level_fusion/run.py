@@ -80,10 +80,10 @@ def plot_data_until_d9(this_dir: str):
 
         ax.set_xlabel(r"physical error rate $p$")
         ax.set_ylabel(r"decoding latency $L$ ($\mu s$)")
-        ax.set_title("Latency for Active Layer Optimization")
+        ax.set_title("Active Layer Optimization")
         ax.set_xscale("log")
         ax.set_yscale("log")
-        ax.set_ylim(0.1, 1000.0)
+        ax.set_ylim(0.1, 100.0)
         ax.xaxis.set_major_formatter(
             ticker.FuncFormatter(lambda x, _pos: f"{x * 100:g}%" if x > 0 else "")
         )
