@@ -1,5 +1,8 @@
 import os, sys, git
 
+import matplotlib.pyplot as plt
+from matplotlib import ticker
+
 git_root_dir = git.Repo(".", search_parent_directories=True).working_tree_dir
 sys.path.insert(0, os.path.join(git_root_dir, "benchmark"))
 sys.path.insert(0, os.path.join(git_root_dir, "src", "fpga", "utils"))
@@ -27,47 +30,94 @@ STREAMING_DEFAULT_ARCHIVE_DEPTH = 128
 if os.environ.get("USE_STREAMING") and "ARCHIVE_DEPTH" not in os.environ:
     os.environ["ARCHIVE_DEPTH"] = str(STREAMING_DEFAULT_ARCHIVE_DEPTH)
 
+# Line color and marker per distance d (match reference figure style).
+_D_PLOT_STYLE = {
+    15: ("#ff69b4", "x"),
+    13: ("saddlebrown", "+"),
+    11: ("purple", "*"),
+    9: ("red", "o"),
+    7: ("green", "s"),
+    5: ("orange", "^"),
+    3: ("blue", "o"),
+}
+
 
 def plot_data_until_d9(this_dir: str):
+    """Log–log plot: x = physical error rate (tick labels as %), y = latency in μs."""
     name = os.path.basename(this_dir)
-    plt.cla()
-    for d in d_vec:
-        if d > 9:
-            continue
-        with open(os.path.join(this_dir, f"d_{d}.txt"), "r", encoding="utf8") as f:
-            p_data = []
-            average_latency_data = []
-            for line in f.readlines():
-                line = line.strip("\r\n ")
-                if line == "" or line.startswith("#"):
-                    continue
-                spt = line.split(" ")
-                assert len(spt) == 3
-                p_data.append(float(spt[0]))
-                average_latency_data.append(float(spt[1]))
-        plt.loglog(p_data, average_latency_data, "o-", label=f"$d = {d}$")
-    plt.ylim(1e-7, 3e-4)
-    plt.ylabel("decoding latency")
-    plt.xlabel("physical error rate")
-    plt.legend()
-    plt.savefig(os.path.join(this_dir, f"{name}.pdf"))
+    plt.close("all")
+    style = {
+        "font.family": "serif",
+        "font.serif": ["DejaVu Serif", "Times New Roman", "Bitstream Vera Serif"],
+        "mathtext.fontset": "cm",
+    }
+    with plt.rc_context(style):
+        fig, ax = plt.subplots(figsize=(6, 4))
+
+        d_plotted = sorted((d for d in d_vec if d <= 9), reverse=True)
+        for d in d_plotted:
+            color, marker = _D_PLOT_STYLE.get(d, ("black", "o"))
+            with open(os.path.join(this_dir, f"d_{d}.txt"), "r", encoding="utf8") as f:
+                p_data = []
+                average_latency_data = []
+                for line in f.readlines():
+                    line = line.strip("\r\n ")
+                    if line == "" or line.startswith("#"):
+                        continue
+                    spt = line.split(" ")
+                    assert len(spt) == 3
+                    p_data.append(float(spt[0]))
+                    average_latency_data.append(float(spt[1]))
+            latency_us = [lat * 1e6 for lat in average_latency_data]
+            ax.loglog(
+                p_data,
+                latency_us,
+                color=color,
+                marker=marker,
+                linestyle="-",
+                label=rf"$d = {d}$",
+            )
+
+        ax.set_xlabel(r"physical error rate $p$")
+        ax.set_ylabel(r"decoding latency $L$ ($\mu s$)")
+        ax.set_title("Latency for Active Layer Optimization")
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_ylim(0.1, 1000.0)
+        ax.xaxis.set_major_formatter(
+            ticker.FuncFormatter(lambda x, _pos: f"{x * 100:g}%" if x > 0 else "")
+        )
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _pos: f"{y:g}"))
+
+        ax.grid(True, which="major", axis="y", linestyle="--", color="lightgray", linewidth=0.8)
+        ax.grid(False, axis="x")
+        ax.set_axisbelow(True)
+
+        ax.tick_params(axis="both", which="major", direction="in", top=True, right=True)
+        ax.tick_params(axis="both", which="minor", direction="in", top=True, right=True)
+
+        ax.legend(loc="upper left", frameon=True)
+
+        fig.tight_layout()
+        fig.savefig(os.path.join(this_dir, f"{name}.pdf"))
+        plt.close(fig)
 
 
 if __name__ == "__main__":
     data = []
-    for d in d_vec:
-        latency_vec = []
-        for p in p_vec:
-            benchmarker = DecodingSpeedBenchmarker(
-                this_dir=this_dir,
-                configuration=CircuitLevelFinalConfig(d=d),
-                p=p,
-                samples=SAMPLES,
-                use_layer_fusion=True,
-                enable_detailed_print=False,
-            )
-            result = benchmarker.run()
-            latency_vec.append(result.latency)
-        data.append(latency_vec)
-        save_data(data, this_dir)
+    # for d in d_vec:
+    #     latency_vec = []
+    #     for p in p_vec:
+    #         benchmarker = DecodingSpeedBenchmarker(
+    #             this_dir=this_dir,
+    #             configuration=CircuitLevelFinalConfig(d=d),
+    #             p=p,
+    #             samples=SAMPLES,
+    #             use_layer_fusion=True,
+    #             enable_detailed_print=False,
+    #         )
+    #         result = benchmarker.run()
+    #         latency_vec.append(result.latency)
+    #     data.append(latency_vec)
+    #     save_data(data, this_dir)
     plot_data_until_d9(this_dir)
