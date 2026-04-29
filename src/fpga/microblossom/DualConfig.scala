@@ -15,10 +15,11 @@ case class DualConfig(
     var weightBits: Int = 26,
     var broadcastDelay: Int = 0,
     var convergecastDelay: Int = 1, // the write or register update takes 1 clock cycle, so delay the output by 1
-    // Insert N extra pipeline stages into the convergecast reduction trees (maxGrowable + conflict).
-    // Each stage is a RegNext placed roughly every mgMaxDepth/(N+1) internal levels, cutting the
-    // critical path ~(N+1)x at the cost of +N cycles of obstacle-read latency. For large `d` the
-    // Edge→selectedMaxGrowable reduction becomes route-bound; pipelining here recovers frequency.
+    // Configured pipeline stages for the convergecast reduction trees (maxGrowable + conflict).
+    // Each stage tries to insert one `RegNext` layer to cut the route-dominated critical path.
+    // The trees produced by `inferred_from_positions` are NOT balanced, so the actual added
+    // latency is computed per-tree (`convergecastActualPipelineDelay`); paths inside the tree
+    // are aligned with extra `RegNext`s so every leaf-to-root path has the same total delay.
     var convergecastPipelineStages: Int = 0,
     var instructionBufferDepth: Int = 4, // buffer write instructions for higher throughput, must be a power of 2
     var contextDepth: Int = 1, // how many different contexts are supported
@@ -63,8 +64,18 @@ case class DualConfig(
     val contextDelay = 2 * (contextDepth != 1).toInt
     injectRegisters.length + contextDelay
   }
+  /** Actual pipeline delay added at the convergecast tree roots, taken as the larger of the
+    * vertex_edge and edge tree (the smaller is padded to match inside `DistributedDual`). */
+  def convergecastActualPipelineDelay: Int = {
+    if (graph == null || convergecastPipelineStages <= 0) 0
+    else {
+      val mg = ConvergecastPipelining.rootDelay(graph.vertex_edge_binary_tree.nodes, convergecastPipelineStages)
+      val cf = ConvergecastPipelining.rootDelay(graph.edge_binary_tree.nodes, convergecastPipelineStages)
+      scala.math.max(mg, cf)
+    }
+  }
   def readLatency = { // from sending the command to receiving the obstacle
-    broadcastDelay + convergecastDelay + convergecastPipelineStages + executeLatency
+    broadcastDelay + convergecastDelay + convergecastActualPipelineDelay + executeLatency
   }
   def layerFusion = {
     graph.layer_fusion match {

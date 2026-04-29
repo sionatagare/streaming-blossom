@@ -249,33 +249,17 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     vertex.io.scanWritebackIndex := scanWritebackIndex
   }
 
-  // Compute per-node depth for a binary-tree representation (leaves at 0, parents = 1 + max(children)).
-  // Nodes are assumed stored so that every internal node's children have smaller indices (built bottom-up).
-  def computeTreeDepths(nodes: Seq[microblossom.util.BinaryTreeNode]): Array[Int] = {
-    val depths = new Array[Int](nodes.length)
-    for (i <- nodes.indices) {
-      val n = nodes(i)
-      (n.l, n.r) match {
-        case (Some(lv), Some(rv)) =>
-          depths(i) = 1 + scala.math.max(depths(lv.toInt), depths(rv.toInt))
-        case _ => depths(i) = 0
-      }
-    }
-    depths
-  }
-  // Pick N depths evenly spaced along [1 .. maxDepth-1] to insert pipeline registers at.
-  // Example: maxDepth=12, stages=2 → depths {4, 8}. At each of those depths, the internal-node
-  // output is registered (RegNext) before being consumed by its parent. Adds N cycles of latency.
-  def pipelineDepthSet(maxDepth: Int, stages: Int): Set[Int] = {
-    if (stages <= 0 || maxDepth <= 1) Set.empty
-    else (1 to stages).map(i => (i * maxDepth / (stages + 1)).max(1)).toSet
-  }
-
   // build convergecast tree for maxGrowable
+  // The tree (`vertex_edge_binary_tree`) is built geometrically and is NOT balanced — odd-out
+  // leaves are carried up unchanged, so leaf-to-root paths can have different lengths and
+  // depths can jump along a path. We align children to the same outputDelay before each merge
+  // (extra `RegNext`s on the shallower side) so the mux always compares values from the same
+  // broadcast cycle.
   val mgTreeNodes = config.graph.vertex_edge_binary_tree.nodes
-  val mgDepths = computeTreeDepths(mgTreeNodes)
+  val mgDepths = ConvergecastPipelining.computeTreeDepths(mgTreeNodes)
   val mgMaxDepth = if (mgDepths.isEmpty) 0 else mgDepths.max
-  val mgPipelineDepths = pipelineDepthSet(mgMaxDepth, config.convergecastPipelineStages)
+  val mgPipelineDepths = ConvergecastPipelining.pipelineDepthSet(mgMaxDepth, config.convergecastPipelineStages)
+  val mgOutputDelays = ConvergecastPipelining.computeOutputDelays(mgTreeNodes, mgDepths, mgPipelineDepths)
   val maxGrowableConvergcastTree =
     Vec.fill(mgTreeNodes.length)(ConvergecastMaxGrowable(config.weightBits))
   for ((treeNode, index) <- mgTreeNodes.zipWithIndex) {
@@ -286,8 +270,11 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       val edgeIndex = index - config.vertexNum
       maxGrowableConvergcastTree(index) := edges(edgeIndex).io.maxGrowable
     } else {
-      val left = maxGrowableConvergcastTree(treeNode.l.get.toInt)
-      val right = maxGrowableConvergcastTree(treeNode.r.get.toInt)
+      val li = treeNode.l.get.toInt
+      val ri = treeNode.r.get.toInt
+      val target = scala.math.max(mgOutputDelays(li), mgOutputDelays(ri))
+      val left = Delay(maxGrowableConvergcastTree(li), target - mgOutputDelays(li))
+      val right = Delay(maxGrowableConvergcastTree(ri), target - mgOutputDelays(ri))
       val merged = ConvergecastMaxGrowable(config.weightBits)
       when(left.length < right.length) {
         merged := left
@@ -301,16 +288,14 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       }
     }
   }
+  val mgRootDelay = if (mgOutputDelays.isEmpty) 0 else mgOutputDelays(mgOutputDelays.length - 1)
 
-  val selectedMaxGrowable =
-    Delay(maxGrowableConvergcastTree(mgTreeNodes.length - 1), config.convergecastDelay)
-  io.maxGrowable.resizedFrom(selectedMaxGrowable)
-
-  // build convergecast tree of conflict (same pipelining scheme applied for matched latency)
+  // build convergecast tree of conflict (same alignment scheme)
   val cfTreeNodes = config.graph.edge_binary_tree.nodes
-  val cfDepths = computeTreeDepths(cfTreeNodes)
+  val cfDepths = ConvergecastPipelining.computeTreeDepths(cfTreeNodes)
   val cfMaxDepth = if (cfDepths.isEmpty) 0 else cfDepths.max
-  val cfPipelineDepths = pipelineDepthSet(cfMaxDepth, config.convergecastPipelineStages)
+  val cfPipelineDepths = ConvergecastPipelining.pipelineDepthSet(cfMaxDepth, config.convergecastPipelineStages)
+  val cfOutputDelays = ConvergecastPipelining.computeOutputDelays(cfTreeNodes, cfDepths, cfPipelineDepths)
   val conflictConvergecastTree =
     Vec.fill(cfTreeNodes.length)(ConvergecastConflict(config.vertexBits))
   for ((treeNode, index) <- cfTreeNodes.zipWithIndex) {
@@ -318,8 +303,11 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       val edgeIndex = index
       conflictConvergecastTree(index) := edges(edgeIndex).io.conflict
     } else {
-      val left = conflictConvergecastTree(treeNode.l.get.toInt)
-      val right = conflictConvergecastTree(treeNode.r.get.toInt)
+      val li = treeNode.l.get.toInt
+      val ri = treeNode.r.get.toInt
+      val target = scala.math.max(cfOutputDelays(li), cfOutputDelays(ri))
+      val left = Delay(conflictConvergecastTree(li), target - cfOutputDelays(li))
+      val right = Delay(conflictConvergecastTree(ri), target - cfOutputDelays(ri))
       val merged = ConvergecastConflict(config.vertexBits)
       when(left.valid) {
         merged := left
@@ -333,8 +321,18 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       }
     }
   }
+  val cfRootDelay = if (cfOutputDelays.isEmpty) 0 else cfOutputDelays(cfOutputDelays.length - 1)
+
+  // The two trees may produce different actual root delays for the same `convergecastPipelineStages`
+  // (they have different leaf counts and shapes). Pad the shorter one so both `io.maxGrowable` and
+  // `io.conflict` are synchronised, and `parityReports` lines up with both. `readLatency` in
+  // `DualConfig` returns this same `rootCommonDelay`.
+  val rootCommonDelay = scala.math.max(mgRootDelay, cfRootDelay)
+  val selectedMaxGrowable =
+    Delay(maxGrowableConvergcastTree(mgTreeNodes.length - 1), config.convergecastDelay + (rootCommonDelay - mgRootDelay))
+  io.maxGrowable.resizedFrom(selectedMaxGrowable)
   val convergecastedConflict =
-    Delay(conflictConvergecastTree(cfTreeNodes.length - 1), config.convergecastDelay)
+    Delay(conflictConvergecastTree(cfTreeNodes.length - 1), config.convergecastDelay + (rootCommonDelay - cfRootDelay))
   io.conflict.resizedFrom(convergecastedConflict)
 
   // build convergecast tree of parity reporter
@@ -348,11 +346,7 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       }
     }
     val parityReport = parities.reduceBalancedTree(_ ^ _) // XOR
-    // Match the maxGrowable/conflict convergecast latency so the popped response payload is
-    // self-consistent: with `convergecastPipelineStages > 0` the maxGrowable/conflict trees
-    // get extra mid-tree registers, so parityReports needs the same total delay or it leads
-    // by `convergecastPipelineStages` cycles, breaking the offloader pre-match invariants.
-    io.parityReports(index) := Delay(parityReport, config.convergecastDelay + config.convergecastPipelineStages)
+    io.parityReports(index) := Delay(parityReport, config.convergecastDelay + rootCommonDelay)
   }
 
   def simExecute(instruction: Long): (DataMaxGrowable, DataConflictRaw) = {
