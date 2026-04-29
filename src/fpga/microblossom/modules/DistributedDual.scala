@@ -249,10 +249,36 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     vertex.io.scanWritebackIndex := scanWritebackIndex
   }
 
+  // Compute per-node depth for a binary-tree representation (leaves at 0, parents = 1 + max(children)).
+  // Nodes are assumed stored so that every internal node's children have smaller indices (built bottom-up).
+  def computeTreeDepths(nodes: Seq[microblossom.util.BinaryTreeNode]): Array[Int] = {
+    val depths = new Array[Int](nodes.length)
+    for (i <- nodes.indices) {
+      val n = nodes(i)
+      (n.l, n.r) match {
+        case (Some(lv), Some(rv)) =>
+          depths(i) = 1 + scala.math.max(depths(lv.toInt), depths(rv.toInt))
+        case _ => depths(i) = 0
+      }
+    }
+    depths
+  }
+  // Pick N depths evenly spaced along [1 .. maxDepth-1] to insert pipeline registers at.
+  // Example: maxDepth=12, stages=2 → depths {4, 8}. At each of those depths, the internal-node
+  // output is registered (RegNext) before being consumed by its parent. Adds N cycles of latency.
+  def pipelineDepthSet(maxDepth: Int, stages: Int): Set[Int] = {
+    if (stages <= 0 || maxDepth <= 1) Set.empty
+    else (1 to stages).map(i => (i * maxDepth / (stages + 1)).max(1)).toSet
+  }
+
   // build convergecast tree for maxGrowable
+  val mgTreeNodes = config.graph.vertex_edge_binary_tree.nodes
+  val mgDepths = computeTreeDepths(mgTreeNodes)
+  val mgMaxDepth = if (mgDepths.isEmpty) 0 else mgDepths.max
+  val mgPipelineDepths = pipelineDepthSet(mgMaxDepth, config.convergecastPipelineStages)
   val maxGrowableConvergcastTree =
-    Vec.fill(config.graph.vertex_edge_binary_tree.nodes.length)(ConvergecastMaxGrowable(config.weightBits))
-  for ((treeNode, index) <- config.graph.vertex_edge_binary_tree.nodes.zipWithIndex) {
+    Vec.fill(mgTreeNodes.length)(ConvergecastMaxGrowable(config.weightBits))
+  for ((treeNode, index) <- mgTreeNodes.zipWithIndex) {
     if (index < config.vertexNum) {
       val vertexIndex = index
       maxGrowableConvergcastTree(index) := vertices(vertexIndex).io.maxGrowable
@@ -262,37 +288,53 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
     } else {
       val left = maxGrowableConvergcastTree(treeNode.l.get.toInt)
       val right = maxGrowableConvergcastTree(treeNode.r.get.toInt)
+      val merged = ConvergecastMaxGrowable(config.weightBits)
       when(left.length < right.length) {
-        maxGrowableConvergcastTree(index) := left
+        merged := left
       } otherwise {
-        maxGrowableConvergcastTree(index) := right
+        merged := right
+      }
+      if (mgPipelineDepths.contains(mgDepths(index))) {
+        maxGrowableConvergcastTree(index) := RegNext(merged)
+      } else {
+        maxGrowableConvergcastTree(index) := merged
       }
     }
   }
 
   val selectedMaxGrowable =
-    Delay(maxGrowableConvergcastTree(config.graph.vertex_edge_binary_tree.nodes.length - 1), config.convergecastDelay)
+    Delay(maxGrowableConvergcastTree(mgTreeNodes.length - 1), config.convergecastDelay)
   io.maxGrowable.resizedFrom(selectedMaxGrowable)
 
-  // build convergecast tree of conflict
+  // build convergecast tree of conflict (same pipelining scheme applied for matched latency)
+  val cfTreeNodes = config.graph.edge_binary_tree.nodes
+  val cfDepths = computeTreeDepths(cfTreeNodes)
+  val cfMaxDepth = if (cfDepths.isEmpty) 0 else cfDepths.max
+  val cfPipelineDepths = pipelineDepthSet(cfMaxDepth, config.convergecastPipelineStages)
   val conflictConvergecastTree =
-    Vec.fill(config.graph.edge_binary_tree.nodes.length)(ConvergecastConflict(config.vertexBits))
-  for ((treeNode, index) <- config.graph.edge_binary_tree.nodes.zipWithIndex) {
+    Vec.fill(cfTreeNodes.length)(ConvergecastConflict(config.vertexBits))
+  for ((treeNode, index) <- cfTreeNodes.zipWithIndex) {
     if (index < config.edgeNum) {
       val edgeIndex = index
       conflictConvergecastTree(index) := edges(edgeIndex).io.conflict
     } else {
       val left = conflictConvergecastTree(treeNode.l.get.toInt)
       val right = conflictConvergecastTree(treeNode.r.get.toInt)
+      val merged = ConvergecastConflict(config.vertexBits)
       when(left.valid) {
-        conflictConvergecastTree(index) := left
+        merged := left
       } otherwise {
-        conflictConvergecastTree(index) := right
+        merged := right
+      }
+      if (cfPipelineDepths.contains(cfDepths(index))) {
+        conflictConvergecastTree(index) := RegNext(merged)
+      } else {
+        conflictConvergecastTree(index) := merged
       }
     }
   }
   val convergecastedConflict =
-    Delay(conflictConvergecastTree(config.graph.edge_binary_tree.nodes.length - 1), config.convergecastDelay)
+    Delay(conflictConvergecastTree(cfTreeNodes.length - 1), config.convergecastDelay)
   io.conflict.resizedFrom(convergecastedConflict)
 
   // build convergecast tree of parity reporter
@@ -306,7 +348,11 @@ case class DistributedDual(config: DualConfig, ioConfig: DualConfig) extends Com
       }
     }
     val parityReport = parities.reduceBalancedTree(_ ^ _) // XOR
-    io.parityReports(index) := Delay(parityReport, config.convergecastDelay)
+    // Match the maxGrowable/conflict convergecast latency so the popped response payload is
+    // self-consistent: with `convergecastPipelineStages > 0` the maxGrowable/conflict trees
+    // get extra mid-tree registers, so parityReports needs the same total delay or it leads
+    // by `convergecastPipelineStages` cycles, breaking the offloader pre-match invariants.
+    io.parityReports(index) := Delay(parityReport, config.convergecastDelay + config.convergecastPipelineStages)
   }
 
   def simExecute(instruction: Long): (DataMaxGrowable, DataConflictRaw) = {

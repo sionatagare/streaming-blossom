@@ -176,6 +176,9 @@ class MicroBlossomAxi4Builder:
     inject_registers: list[str] | str = field(default_factory=lambda: [])
     # DualConfig elastic archive BRAM depth; None → env ARCHIVE_DEPTH (default 1). Streaming needs this large enough.
     archive_depth: int | None = None
+    # Pipeline stages inserted into convergecast reduction trees to cut route-dominated critical path at high d.
+    # Adds N cycles of obstacle-read latency per stage.
+    convergecast_pipeline_stages: int = 0
 
     # not none after
     project_builder: MicroBlossomProjectBuilder | None = None
@@ -222,6 +225,7 @@ class MicroBlossomAxi4Builder:
             archive_depth = int(os.environ.get("ARCHIVE_DEPTH", "1"))
         assert archive_depth >= 1, "archive_depth must be >= 1"
         parameters += ["--archive-depth", str(archive_depth)]
+        parameters += ["--convergecast-pipeline-stages", str(self.convergecast_pipeline_stages)]
         inject_registers = self.inject_registers
         if isinstance(inject_registers, str):
             inject_registers = [e for e in self.inject_registers.split(",") if e != ""]

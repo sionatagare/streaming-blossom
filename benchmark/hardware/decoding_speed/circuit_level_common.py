@@ -6,7 +6,10 @@ p_vec = [1e-4 * (10 ** (i / p_per_10)) for i in range(-2, p_per_10 * 2 + 1)]
 d_vec = [3, 5, 7, 9, 11, 13, 15]
 
 
-def save_data(data, this_dir: str):
+def save_data(data, this_dir: str, d_vec=d_vec):
+    # `d_vec` defaults to the module-level full sweep; callers that override d_vec
+    # locally (e.g. d_vec=[9] for a single-d benchmark) MUST pass it explicitly,
+    # otherwise data[0] gets paired with d_vec[0]=3 and is written to the wrong file.
     for d, latency_vec in zip(d_vec, data):
         with open(os.path.join(this_dir, f"d_{d}.txt"), "w", encoding="utf8") as f:
             f.write("# <p> <average latency> <samples>\n")

@@ -941,6 +941,8 @@ class MicroBlossomBusGeneratorConf(arguments: Seq[String]) extends ScallopConf(a
   val clockDivideBy = opt[Double](default = Some(2))
   /** Elastic `layers` BRAM depth per vertex (layer fusion / streaming). Must cover retained archive slices. */
   val archiveDepth = opt[Int](default = Some(1))
+  /** Extra pipeline stages in convergecast reduction trees (maxGrowable + conflict). Default 0. */
+  val convergecastPipelineStages = opt[Int](default = Some(0))
   verify()
   def dualConfig = DualConfig(
     filename = graph(),
@@ -954,7 +956,8 @@ class MicroBlossomBusGeneratorConf(arguments: Seq[String]) extends ScallopConf(a
     supportLayerFusion = supportLayerFusion(),
     supportLoadStallEmulator = supportLoadStallEmulator(),
     injectRegisters = injectRegisters(),
-    archiveDepth = archiveDepth()
+    archiveDepth = archiveDepth(),
+    convergecastPipelineStages = convergecastPipelineStages()
   )
 }
 

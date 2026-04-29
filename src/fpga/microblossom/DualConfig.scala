@@ -15,6 +15,11 @@ case class DualConfig(
     var weightBits: Int = 26,
     var broadcastDelay: Int = 0,
     var convergecastDelay: Int = 1, // the write or register update takes 1 clock cycle, so delay the output by 1
+    // Insert N extra pipeline stages into the convergecast reduction trees (maxGrowable + conflict).
+    // Each stage is a RegNext placed roughly every mgMaxDepth/(N+1) internal levels, cutting the
+    // critical path ~(N+1)x at the cost of +N cycles of obstacle-read latency. For large `d` the
+    // Edge→selectedMaxGrowable reduction becomes route-bound; pipelining here recovers frequency.
+    var convergecastPipelineStages: Int = 0,
     var instructionBufferDepth: Int = 4, // buffer write instructions for higher throughput, must be a power of 2
     var contextDepth: Int = 1, // how many different contexts are supported
     var conflictChannels: Int = 1, // how many conflicts are collected at once in parallel
@@ -59,7 +64,7 @@ case class DualConfig(
     injectRegisters.length + contextDelay
   }
   def readLatency = { // from sending the command to receiving the obstacle
-    broadcastDelay + convergecastDelay + executeLatency
+    broadcastDelay + convergecastDelay + convergecastPipelineStages + executeLatency
   }
   def layerFusion = {
     graph.layer_fusion match {

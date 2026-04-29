@@ -39,6 +39,9 @@ class Configuration(OptimizableConfiguration):
         if frequency is None:
             frequency = self.frequency
         archive_depth = int(os.environ.get("ARCHIVE_DEPTH", "128"))
+        # Optional: cut the Edge→selectedMaxGrowable critical path by N extra pipeline stages.
+        # `CONVERGECAST_PIPELINE_STAGES=1` recovers ~30% frequency at d=9+, costs +1 cycle read latency.
+        conv_pipeline_stages = int(os.environ.get("CONVERGECAST_PIPELINE_STAGES", "0"))
         return MicroBlossomAxi4Builder(
             graph_builder=self.get_graph_builder(),
             name=self.name() + f"_f{frequency}",
@@ -49,6 +52,7 @@ class Configuration(OptimizableConfiguration):
             support_layer_fusion=True,
             support_load_stall_emulator=True,
             archive_depth=archive_depth,
+            convergecast_pipeline_stages=conv_pipeline_stages,
         )
 
 

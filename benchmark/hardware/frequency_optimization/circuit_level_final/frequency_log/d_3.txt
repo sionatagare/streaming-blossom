@@ -1,4 +1,2 @@
-[2024-06-05 20:24:42] optimization start
-[2024-06-05 20:24:42] iteration 0: trying frequency 170
-[2024-06-05 20:37:37] suggested achievable frequency is NoneMHz
-[2024-06-05 20:37:37] [found best frequency] 170
+[2026-04-28 14:23:10] manual: chain test, pipeline=1, target 150
+[2026-04-28 14:23:10] [found best frequency] 150

@@ -1,4 +1,2 @@
-[2024-06-05 00:40:57] optimization start
-[2024-06-05 00:40:57] iteration 0: trying frequency 93
-[2024-06-05 02:14:34] suggested achievable frequency is NoneMHz
-[2024-06-05 02:14:34] [found best frequency] 93
+[2026-04-28 00:30:00] manual: post-pipeline=1 test; WNS at 150 suggested 123, target 115 for headroom
+[2026-04-28 00:30:00] [found best frequency] 115
