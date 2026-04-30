@@ -80,7 +80,7 @@ def plot_data_until_d9(this_dir: str):
 
         ax.set_xlabel(r"physical error rate $p$")
         ax.set_ylabel(r"decoding latency $L$ ($\mu s$)")
-        ax.set_title("Baseline Design")
+        ax.set_title("Frequency Optimized Design")
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_ylim(0.1, 100.0)
@@ -104,21 +104,21 @@ def plot_data_until_d9(this_dir: str):
 
 
 if __name__ == "__main__":
-    d_vec = [5]   # parity-fix retest
+    d_vec = [3,5,7,9]   # parity-fix retest
     data = []
-    for d in d_vec:
-        latency_vec = []
-        for p in p_vec:
-            benchmarker = DecodingSpeedBenchmarker(
-                this_dir=this_dir,
-                configuration=CircuitLevelFinalConfig(d=d),
-                p=p,
-                samples=SAMPLES,
-                use_layer_fusion=True,
-                enable_detailed_print=False,
-            )
-            result = benchmarker.run()
-            latency_vec.append(result.latency)
-        data.append(latency_vec)
-        save_data(data, this_dir, d_vec=d_vec)
+    # for d in d_vec:
+    #     latency_vec = []
+    #     for p in p_vec:
+    #         benchmarker = DecodingSpeedBenchmarker(
+    #             this_dir=this_dir,
+    #             configuration=CircuitLevelFinalConfig(d=d),
+    #             p=p,
+    #             samples=SAMPLES,
+    #             use_layer_fusion=True,
+    #             enable_detailed_print=False,
+    #         )
+    #         result = benchmarker.run()
+    #         latency_vec.append(result.latency)
+    #     data.append(latency_vec)
+    #     save_data(data, this_dir, d_vec=d_vec)
     plot_data_until_d9(this_dir)
